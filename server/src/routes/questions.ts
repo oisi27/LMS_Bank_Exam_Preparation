@@ -74,6 +74,43 @@ const questionCreateSchema = questionCoreSchema.superRefine((data, ctx) => {
 
 const questionUpdateSchema = questionCoreSchema.partial();
 
+// Canonical Subject Category Mapping for Bank Exam Preparation
+// Maps frontend Category Labels to the actual database subject strings
+const SUBJECT_CANONICAL_MAP: Record<string, string[]> = {
+  // Quantitative Mathematics UI Categories
+  'quantitative mathematics': ['Mathematics', 'Math', 'Quantitative Aptitude', 'Quantitative Aptitude & Mathematics'],
+  'mathematics & analytical ability': ['Mathematics', 'Math', 'Quantitative Aptitude', 'Quantitative Aptitude & Mathematics', 'Analytical Reasoning'],
+
+  // English Language UI Category
+  'english language': ['English', 'English Language & Literature'],
+
+  // Bangla Language UI Category
+  'bangla language': ['Bangla', 'Bangla Language & Literature'],
+
+  // General Knowledge UI Category
+  'general knowledge': ['General Knowledge', 'GK', 'General Knowledge & Banking Affairs', 'General'],
+  'general knowledge & bangladesh affairs': ['General Knowledge', 'GK', 'General Knowledge & Banking Affairs', 'General'],
+  'bangladesh & global affairs': ['General Knowledge', 'GK', 'General Knowledge & Banking Affairs', 'General'],
+
+  // Banking & ICT UI Category
+  'banking & ict': ['Banking and Finance', 'Computer and ICT', 'Computer & Information Technology'],
+  'banking & financial sector': ['Banking and Finance', 'Computer and ICT', 'Computer & Information Technology'],
+  'banking, finance & economy': ['Banking and Finance', 'Computer and ICT', 'Computer & Information Technology'],
+
+  // Analytical Ability UI Category
+  'analytical reasoning': ['Analytical Reasoning'],
+  'analytical ability': ['Analytical Reasoning']
+};
+
+export function resolveSubjectFilter(subjectQuery: string): string[] {
+  const normalized = subjectQuery.trim().toLowerCase();
+  if (SUBJECT_CANONICAL_MAP[normalized]) {
+    return SUBJECT_CANONICAL_MAP[normalized];
+  }
+  // When an exact database subject string is queried (e.g. 'Quantitative Aptitude & Mathematics', 'Math', 'English', etc.), query it directly
+  return [subjectQuery.trim()];
+}
+
 // ==========================================
 // 1. GET /api/questions - List with Search & Filtering & Pagination
 // ==========================================
@@ -94,9 +131,16 @@ questionsRouter.get('/', authenticateToken, (req: Request, res: Response) => {
   let whereClause = ' WHERE 1=1';
   const params: any[] = [];
 
-  if (subject) {
-    whereClause += ' AND subject = ?';
-    params.push(subject);
+  if (subject && typeof subject === 'string' && subject.trim() !== '') {
+    const matchedSubjects = resolveSubjectFilter(subject);
+    if (matchedSubjects.length === 1) {
+      whereClause += ' AND subject = ?';
+      params.push(matchedSubjects[0]);
+    } else {
+      const placeholders = matchedSubjects.map(() => '?').join(', ');
+      whereClause += ` AND subject IN (${placeholders})`;
+      params.push(...matchedSubjects);
+    }
   }
   if (chapter) {
     whereClause += ' AND chapter = ?';

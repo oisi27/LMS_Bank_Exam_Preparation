@@ -172,7 +172,11 @@ const lessonSchema = z.object({
   content: z.string().optional().nullable(),
   videoUrl: z.string().optional().nullable(),
   durationMinutes: z.number().int().min(1).default(15),
-  isFreePreview: z.boolean().default(false),
+  isFreePreview: z.preprocess((val) => {
+    if (typeof val === 'number') return val === 1;
+    if (typeof val === 'string') return val === 'true' || val === '1';
+    return val;
+  }, z.boolean()).default(false),
   sortOrder: z.number().int().default(0)
 });
 
@@ -222,6 +226,10 @@ coursesRouter.post('/categories', authenticateToken, requireRole('INSTRUCTOR', '
 coursesRouter.get('/', authenticateToken, (req: Request, res: Response) => {
   const isPrivileged = req.user?.role === 'INSTRUCTOR' || req.user?.role === 'ADMIN';
   const isMineOnly = req.query.mine === 'true';
+  const rawSearch = typeof req.query.search === 'string' ? req.query.search.trim() : undefined;
+  const rawCategoryId = typeof req.query.categoryId === 'string'
+    ? req.query.categoryId.trim()
+    : (typeof req.query.category_id === 'string' ? req.query.category_id.trim() : undefined);
 
   let query = `
     SELECT c.*, cat.name as category_name, cat.name_bangla as category_name_bangla, u.name as instructor_name
@@ -230,27 +238,45 @@ coursesRouter.get('/', authenticateToken, (req: Request, res: Response) => {
     LEFT JOIN users u ON u.id = c.instructor_id
   `;
   const params: any[] = [];
+  const whereClauses: string[] = [];
 
   if (isMineOnly) {
     if (req.user?.role === 'INSTRUCTOR') {
       // In Course Builder / My Courses mode, instructors ONLY see courses they own
-      query += ` WHERE c.instructor_id = ?`;
+      whereClauses.push('c.instructor_id = ?');
       params.push(req.user.id);
     } else if (!isPrivileged) {
       // If student passes mine=true, restrict to published
-      query += ` WHERE c.status = 'PUBLISHED'`;
+      whereClauses.push("c.status = 'PUBLISHED'");
     }
     // Admins with mine=true continue to have access to all courses
   } else {
     // Standard course catalog query
     // Students can ONLY view PUBLISHED courses
     if (!isPrivileged) {
-      query += ` WHERE c.status = 'PUBLISHED'`;
+      whereClauses.push("c.status = 'PUBLISHED'");
     } else if (req.user?.role === 'INSTRUCTOR') {
       // Instructors see all published plus their own draft courses
-      query += ` WHERE c.status = 'PUBLISHED' OR c.instructor_id = ?`;
+      whereClauses.push("(c.status = 'PUBLISHED' OR c.instructor_id = ?)");
       params.push(req.user.id);
     }
+  }
+
+  // Optional Subject / Category Filter
+  if (rawCategoryId && rawCategoryId !== 'ALL') {
+    whereClauses.push('c.category_id = ?');
+    params.push(rawCategoryId);
+  }
+
+  // Optional Search Filter (Title, Bengali Title, Description, Subject Name)
+  if (rawSearch) {
+    whereClauses.push('(c.title LIKE ? OR c.title_bangla LIKE ? OR c.description LIKE ? OR cat.name LIKE ?)');
+    const searchTerm = `%${rawSearch}%`;
+    params.push(searchTerm, searchTerm, searchTerm, searchTerm);
+  }
+
+  if (whereClauses.length > 0) {
+    query += ` WHERE ${whereClauses.join(' AND ')}`;
   }
 
   query += ` ORDER BY c.created_at DESC`;

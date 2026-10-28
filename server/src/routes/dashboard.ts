@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { db } from '../db/schema';
 import { authenticateToken } from '../middleware/auth';
+import { isExamResultReleased } from './exams';
 
 export const dashboardRouter = Router();
 
@@ -9,25 +10,63 @@ dashboardRouter.get('/student-summary', authenticateToken, (req: Request, res: R
   const userId = req.user!.id;
 
   // Recent Exam Results
-  const recentResults = db.prepare(`
-    SELECT r.*, e.title as exam_title, e.category
+  const rawRecentResults = db.prepare(`
+    SELECT r.*, e.title as exam_title, e.category, e.result_release_mode, e.status as exam_status, e.ends_at
     FROM exam_results r
     JOIN exams e ON e.id = r.exam_id
     WHERE r.user_id = ?
     ORDER BY r.created_at DESC
-    LIMIT 5
+    LIMIT 10
   `).all(userId);
 
-  // Aggregated Overall Performance
+  const recentResults = rawRecentResults.map((r: any) => {
+    const isReleased = isExamResultReleased({
+      result_release_mode: r.result_release_mode,
+      status: r.exam_status,
+      ends_at: r.ends_at
+    });
+
+    if (!isReleased) {
+      const mode = r.result_release_mode || 'MANUAL';
+      const releaseNotice = mode === 'SCHEDULED'
+        ? `Scheduled Release on ${r.ends_at ? new Date(r.ends_at).toLocaleDateString() : 'concluding time'}`
+        : 'Pending Instructor Publication';
+
+      return {
+        ...r,
+        is_released: false,
+        release_notice: releaseNotice,
+        score: null,
+        accuracy_percentage: null,
+        correct_count: null,
+        wrong_count: null,
+        skipped_count: null,
+        is_passed: null
+      };
+    }
+
+    return {
+      ...r,
+      is_released: true
+    };
+  });
+
+  // Aggregated Overall Performance (computed ONLY across released results to avoid statistical leak)
   const stats: any = db.prepare(`
     SELECT 
       COUNT(*) as total_exams_taken,
-      COALESCE(AVG(score), 0) as average_score,
-      COALESCE(AVG(accuracy_percentage), 0) as average_accuracy,
-      COALESCE(SUM(correct_count), 0) as total_correct,
-      COALESCE(SUM(wrong_count), 0) as total_wrong
-    FROM exam_results
-    WHERE user_id = ?
+      COALESCE(AVG(r.score), 0) as average_score,
+      COALESCE(AVG(r.accuracy_percentage), 0) as average_accuracy,
+      COALESCE(SUM(r.correct_count), 0) as total_correct,
+      COALESCE(SUM(r.wrong_count), 0) as total_wrong
+    FROM exam_results r
+    JOIN exams e ON e.id = r.exam_id
+    WHERE r.user_id = ?
+      AND (
+        e.result_release_mode = 'INSTANT'
+        OR e.status = 'RESULTS_PUBLISHED'
+        OR (e.result_release_mode = 'SCHEDULED' AND CURRENT_TIMESTAMP >= e.ends_at)
+      )
   `).get(userId);
 
   // Detailed Topic & Chapter Accuracy Analytics (Phase 7 Milestone 1 Step 4)
@@ -202,9 +241,9 @@ dashboardRouter.get('/student-summary', authenticateToken, (req: Request, res: R
   // Scheduled & Active Mock Tests with dynamic server-authoritative availability
   const serverNow = new Date();
   const rawExams = db.prepare(`
-    SELECT id, title, title_bangla, duration_minutes, total_marks, starts_at, ends_at, status
+    SELECT id, title, title_bangla, category, type, duration_minutes, total_marks, starts_at, ends_at, status
     FROM exams
-    WHERE status IN ('SCHEDULED', 'LIVE', 'CLOSED')
+    WHERE status IN ('SCHEDULED', 'LIVE', 'CLOSED', 'RESULTS_PUBLISHED')
     ORDER BY starts_at ASC
   `).all();
 
@@ -216,7 +255,7 @@ dashboardRouter.get('/student-summary', authenticateToken, (req: Request, res: R
       let calculatedStatus: 'LIVE' | 'UPCOMING' | 'ENDED' = 'ENDED';
       let isAvailable = false;
 
-      if (e.status === 'CLOSED' || serverNow > examEnd) {
+      if (e.status === 'CLOSED' || e.status === 'RESULTS_PUBLISHED' || serverNow > examEnd) {
         calculatedStatus = 'ENDED';
         isAvailable = false;
       } else if (serverNow < examStart) {
@@ -239,6 +278,8 @@ dashboardRouter.get('/student-summary', authenticateToken, (req: Request, res: R
         id: e.id,
         title: e.title,
         title_bangla: e.title_bangla,
+        category: e.category,
+        type: e.type,
         duration_minutes: e.duration_minutes,
         total_marks: e.total_marks,
         starts_at: e.starts_at,

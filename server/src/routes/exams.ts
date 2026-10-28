@@ -48,12 +48,43 @@ const autosaveSchema = z.object({
   clientSequence: z.number().default(0)
 });
 
+/**
+ * Evaluates whether an exam's results are officially released to candidates.
+ * - INSTANT: Immediate release upon attempt submission.
+ * - MANUAL: Withheld until instructor/admin explicitly updates status to RESULTS_PUBLISHED.
+ * - SCHEDULED: Withheld until the scheduled window ends (ends_at) or status is RESULTS_PUBLISHED.
+ */
+export function isExamResultReleased(exam: {
+  result_release_mode?: string | null;
+  status?: string | null;
+  ends_at?: string | null;
+} | null | undefined): boolean {
+  if (!exam) return true;
+  const mode = exam.result_release_mode || 'INSTANT';
+  if (mode === 'INSTANT') {
+    return true;
+  }
+  if (mode === 'MANUAL') {
+    return exam.status === 'RESULTS_PUBLISHED';
+  }
+  if (mode === 'SCHEDULED') {
+    if (exam.status === 'RESULTS_PUBLISHED') return true;
+    if (exam.ends_at) {
+      return new Date() >= new Date(exam.ends_at);
+    }
+    return false;
+  }
+  return true;
+}
+
 // ==========================================
 // 1. GET /api/exams - List Available Exams
 // ==========================================
 examsRouter.get('/', authenticateToken, (req: Request, res: Response) => {
   const isPrivileged = req.user?.role === 'INSTRUCTOR' || req.user?.role === 'ADMIN';
   const isMine = req.query.mine === 'true';
+  const rawSearch = typeof req.query.search === 'string' ? req.query.search.trim() : undefined;
+  const rawCategory = typeof req.query.category === 'string' ? req.query.category.trim() : undefined;
 
   let query = `
     SELECT e.id, e.title, e.title_bangla as titleBangla, e.description,
@@ -70,14 +101,30 @@ examsRouter.get('/', authenticateToken, (req: Request, res: Response) => {
     FROM exams e
   `;
   const params: any[] = [];
+  const whereClauses: string[] = [];
 
   if (isMine && isPrivileged) {
     // Instructor / Admin in Builder mode filtering by their own exams
-    query += ` WHERE e.created_by = ?`;
+    whereClauses.push('e.created_by = ?');
     params.push(req.user!.id);
   } else if (!isPrivileged) {
-    // Normal students only see published / live / scheduled / closed exams
-    query += ` WHERE e.status IN ('LIVE', 'SCHEDULED', 'CLOSED')`;
+    // Normal students only see published / live / scheduled / closed / results published exams
+    whereClauses.push("e.status IN ('LIVE', 'SCHEDULED', 'CLOSED', 'RESULTS_PUBLISHED')");
+  }
+
+  if (rawCategory && rawCategory !== 'ALL') {
+    whereClauses.push('e.category = ?');
+    params.push(rawCategory);
+  }
+
+  if (rawSearch) {
+    whereClauses.push('(e.title LIKE ? OR e.title_bangla LIKE ? OR e.description LIKE ?)');
+    const searchTerm = `%${rawSearch}%`;
+    params.push(searchTerm, searchTerm, searchTerm);
+  }
+
+  if (whereClauses.length > 0) {
+    query += ` WHERE ${whereClauses.join(' AND ')}`;
   }
 
   query += ` ORDER BY e.created_at DESC`;
@@ -185,18 +232,18 @@ examsRouter.get('/:examId/leaderboard', authenticateToken, (req: Request, res: R
   // Instructors/Admins or exam owners can always view leaderboards.
   // For students, check result_release_mode:
   // - INSTANT: Always accessible once submitted.
-  // - SCHEDULED: Accessible only after ends_at has passed.
-  // - MANUAL: Accessible only when exam status is RESULTS_PUBLISHED or CLOSED.
+  // - SCHEDULED: Accessible after ends_at has passed or status is RESULTS_PUBLISHED.
+  // - MANUAL: Accessible strictly when exam status is RESULTS_PUBLISHED.
   if (!isPrivileged && exam.created_by !== currentUserId) {
     const now = new Date();
-    if (exam.result_release_mode === 'SCHEDULED' && now < new Date(exam.ends_at)) {
+    if (exam.result_release_mode === 'SCHEDULED' && exam.status !== 'RESULTS_PUBLISHED' && now < new Date(exam.ends_at)) {
       return res.status(403).json({
         success: false,
         error: `Results and leaderboard are scheduled to be published after the exam window ends on ${exam.ends_at}.`
       });
     }
 
-    if (exam.result_release_mode === 'MANUAL' && exam.status !== 'RESULTS_PUBLISHED' && exam.status !== 'CLOSED') {
+    if (exam.result_release_mode === 'MANUAL' && exam.status !== 'RESULTS_PUBLISHED') {
       return res.status(403).json({
         success: false,
         error: 'Leaderboard results for this exam have not been published by the instructor yet.'
@@ -692,6 +739,28 @@ examsRouter.put('/:id', authenticateToken, requireRole('INSTRUCTOR', 'ADMIN'), (
 });
 
 // ==========================================
+// 4B. POST /api/exams/:id/publish-results - Authorized Instructor Manual Publication
+// ==========================================
+examsRouter.post('/:id/publish-results', authenticateToken, requireRole('INSTRUCTOR', 'ADMIN'), (req: Request, res: Response) => {
+  const existing: any = db.prepare('SELECT id, status, created_by, result_release_mode FROM exams WHERE id = ?').get(req.params.id);
+  if (!existing) {
+    return res.status(404).json({ success: false, error: 'Exam not found' });
+  }
+
+  if (req.user?.role === 'INSTRUCTOR' && existing.created_by && existing.created_by !== req.user.id) {
+    return res.status(403).json({ success: false, error: 'Instructors can only publish results for exams they created' });
+  }
+
+  db.prepare("UPDATE exams SET status = 'RESULTS_PUBLISHED' WHERE id = ?").run(req.params.id);
+
+  res.json({
+    success: true,
+    message: 'Exam results published successfully.',
+    status: 'RESULTS_PUBLISHED'
+  });
+});
+
+// ==========================================
 // 5. POST /api/exams/:examId/start - Start Attempt (Authoritative Timer)
 // ==========================================
 examsRouter.post('/:examId/start', authenticateToken, (req: Request, res: Response) => {
@@ -701,6 +770,13 @@ examsRouter.post('/:examId/start', authenticateToken, (req: Request, res: Respon
   const exam: any = db.prepare('SELECT * FROM exams WHERE id = ?').get(examId);
   if (!exam) {
     return res.status(404).json({ success: false, error: 'Exam not found.' });
+  }
+
+  if (exam.status === 'CLOSED' || exam.status === 'RESULTS_PUBLISHED') {
+    return res.status(400).json({
+      success: false,
+      error: 'This exam has concluded and is no longer accepting new attempts.'
+    });
   }
 
   const now = new Date();
@@ -1153,6 +1229,37 @@ examsRouter.post('/:attemptId/submit', authenticateToken, async (req: Request, r
           throw e;
         }
       }
+    }
+
+    // Enforce result release policy for candidate submissions:
+    // If exam has SCHEDULED release and window is not yet closed (and not RESULTS_PUBLISHED),
+    // or MANUAL release and not yet RESULTS_PUBLISHED:
+    // Grade is computed and securely persisted in database, but withheld from HTTP response.
+    const examInfo: any = db.prepare(`
+      SELECT e.id, e.result_release_mode, e.status, e.ends_at
+      FROM attempts a
+      JOIN exams e ON e.id = a.exam_id
+      WHERE a.id = ?
+    `).get(attemptId);
+
+    const isReleased = isExamResultReleased(examInfo);
+
+    if (!isReleased) {
+      const mode = examInfo?.result_release_mode || 'MANUAL';
+      const releaseNotice = mode === 'SCHEDULED'
+        ? 'Exam submitted successfully. Your result will be available at the scheduled publication time.'
+        : 'Exam submitted successfully. Your result is awaiting publication by the instructor.';
+
+      return res.json({
+        success: true,
+        alreadySubmitted: Boolean(result.alreadySubmitted),
+        attemptId,
+        status: result.status,
+        resultsWithheld: true,
+        releaseMode: mode,
+        scheduledReleaseTime: mode === 'SCHEDULED' ? examInfo?.ends_at : undefined,
+        message: releaseNotice
+      });
     }
 
     res.json(result);
@@ -1610,7 +1717,7 @@ examsRouter.get('/:id/submissions', authenticateToken, requireRole('INSTRUCTOR',
     submissions: submissions.map((s: any) => ({
       attemptId: s.attempt_id,
       userId: s.user_id,
-      studentName: s.student_name || 'Anonymous Student',
+      studentName: s.student_name || 'Unknown Candidate',
       attemptStatus: s.attempt_status,
       startedAt: s.started_at,
       submittedAt: s.submitted_at,
