@@ -1,0 +1,25 @@
+{
+  "name": "bank-exam-lms",
+  "version": "1.0.0",
+  "description": "An Online Learning Management System for Bank Exam Preparation",
+  "private": true,
+  "workspaces": [
+    "server",
+    "client",
+    "shared"
+  ],
+  "scripts": {
+    "dev:server": "npm --prefix server run dev",
+    "dev:client": "npm --prefix client run dev",
+    "build": "npm --prefix server run build && npm --prefix client run build",
+    "test": "npm --prefix server test"
+  },
+  "keywords": [
+    "lms",
+    "bank-exam",
+    "exam-engine",
+    "bangladesh-bank"
+  ],
+  "author": "Farabi Mizan Oisi",
+  "license": "ISC"
+}
