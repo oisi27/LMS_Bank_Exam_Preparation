@@ -20,6 +20,7 @@ import {
   SlidersHorizontal
 } from 'lucide-react';
 import axios from 'axios';
+import { useAuth } from '../context/AuthContext';
 
 interface CoursesScreenProps {
   onBackToDashboard: () => void;
@@ -77,12 +78,15 @@ function parseVideoSource(rawUrl?: string | null): { type: 'YOUTUBE' | 'MP4' | '
 }
 
 export const CoursesScreen: React.FC<CoursesScreenProps> = ({ onBackToDashboard, onTakeExam, initialCourseId }) => {
+  const { user } = useAuth();
   const [courses, setCourses] = useState<any[]>([]);
   const [selectedCourse, setSelectedCourse] = useState<any>(null);
   const [curriculum, setCurriculum] = useState<any>(null);
   const [activeLesson, setActiveLesson] = useState<any>(null);
   const [signedLinkInfo, setSignedLinkInfo] = useState<{ url: string; title: string; expires: number } | null>(null);
-  const [availableExamId, setAvailableExamId] = useState<string | null>(null);
+  const [courseExams, setCourseExams] = useState<any[]>([]);
+  const [selectedCourseExamId, setSelectedCourseExamId] = useState<string | null>(null);
+  const [courseExamsLoading, setCourseExamsLoading] = useState<boolean>(false);
   const [loading, setLoading] = useState(true);
 
   // Video Playback & Fallback State
@@ -101,10 +105,14 @@ export const CoursesScreen: React.FC<CoursesScreenProps> = ({ onBackToDashboard,
   const [selectedCategory, setSelectedCategory] = useState('ALL');
   const [selectedLevel, setSelectedLevel] = useState('ALL');
 
+  // Helper to determine if a course is a legitimate, published, non-archived academic course
+  const isEligibleCourse = (c: any) => Boolean(c && c.status === 'PUBLISHED' && !c.is_archived);
+
   // Compute distinct categories from loaded courses for subject filtering
   const distinctCategories = React.useMemo(() => {
     const catMap = new Map<string, { id: string; name: string; count: number }>();
     for (const c of courses) {
+      if (!isEligibleCourse(c)) continue;
       const id = c.category_id || c.categoryId || 'unknown';
       const name = c.category_name || c.categoryName || 'General';
       if (!catMap.has(id)) {
@@ -115,9 +123,11 @@ export const CoursesScreen: React.FC<CoursesScreenProps> = ({ onBackToDashboard,
     return Array.from(catMap.values());
   }, [courses]);
 
-  // Compute filtered courses based on search query and category
+  // Compute filtered courses based on search query and category (strictly published & non-archived)
   const filteredCourses = React.useMemo(() => {
     return courses.filter((c) => {
+      // Must be an eligible published, non-archived course
+      if (!isEligibleCourse(c)) return false;
       // Category / Subject filter
       if (selectedCategory !== 'ALL' && c.category_id !== selectedCategory && c.categoryId !== selectedCategory) {
         return false;
@@ -144,49 +154,45 @@ export const CoursesScreen: React.FC<CoursesScreenProps> = ({ onBackToDashboard,
       if (!isSelectedPresent) {
         loadCurriculum(filteredCourses[0].id);
       }
+    } else {
+      setSelectedCourse(null);
+      setCurriculum(null);
+      setActiveLesson(null);
     }
   }, [filteredCourses]);
 
-  // Load Courses and Check Active Exam Availability
+  // Load Courses (Requirement: In learning viewer, show ONLY courses satisfying status === 'PUBLISHED' and !is_archived)
   useEffect(() => {
-    async function fetchCoursesAndExams() {
+    async function fetchCourses() {
       try {
         const token = localStorage.getItem('token');
-        const [coursesRes, examsRes] = await Promise.all([
-          axios.get('http://localhost:5000/api/courses', {
-            headers: { Authorization: `Bearer ${token}` }
-          }),
-          axios.get('http://localhost:5000/api/exams', {
-            headers: { Authorization: `Bearer ${token}` }
-          })
-        ]);
-
-        setCourses(coursesRes.data.courses || []);
-        if (coursesRes.data.courses?.length > 0) {
-          const targetCourse = initialCourseId
-            ? coursesRes.data.courses.find((c: any) => c.id === initialCourseId) || coursesRes.data.courses[0]
-            : coursesRes.data.courses[0];
-          loadCurriculum(targetCourse.id);
-        }
-
-        // Find an active exam whose window is currently open
-        const now = new Date();
-        const activeExam = (examsRes.data.exams || []).find((e: any) => {
-          const start = new Date(e.startsAt || e.starts_at);
-          const end = new Date(e.endsAt || e.ends_at);
-          return e.status === 'LIVE' && now >= start && now <= end;
+        const coursesRes = await axios.get('http://localhost:5000/api/courses', {
+          headers: { Authorization: `Bearer ${token}` }
         });
 
-        if (activeExam) {
-          setAvailableExamId(activeExam.id);
+        const rawCourses: any[] = coursesRes.data.courses || [];
+        const eligibleCourses = rawCourses.filter(isEligibleCourse);
+        setCourses(eligibleCourses);
+
+        if (eligibleCourses.length > 0) {
+          const targetCourse = initialCourseId
+            ? eligibleCourses.find((c: any) => c.id === initialCourseId) || eligibleCourses[0]
+            : eligibleCourses[0];
+          loadCurriculum(targetCourse.id);
+        } else {
+          setSelectedCourse(null);
+          setCurriculum(null);
+          setActiveLesson(null);
+          setCourseExams([]);
+          setSelectedCourseExamId(null);
         }
       } catch (err) {
-        console.error(err);
+        console.error('Failed to load courses:', err);
       } finally {
         setLoading(false);
       }
     }
-    fetchCoursesAndExams();
+    fetchCourses();
   }, []);
 
   // Fetch student progress for a course
@@ -209,21 +215,73 @@ export const CoursesScreen: React.FC<CoursesScreenProps> = ({ onBackToDashboard,
     }
   };
 
+  // Fetch exams explicitly linked to this course (Option B: Complete Course-Based Exam Integration)
+  const fetchCourseExams = async (courseId: string) => {
+    if (!courseId) {
+      setCourseExams([]);
+      setSelectedCourseExamId(null);
+      return;
+    }
+    setCourseExamsLoading(true);
+    try {
+      const token = localStorage.getItem('token');
+      const res = await axios.get(`http://localhost:5000/api/courses/${courseId}/exams`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (res.data.success) {
+        const loadedExams: any[] = res.data.exams || [];
+        setCourseExams(loadedExams);
+        if (loadedExams.length > 0) {
+          // If a live exam is available, select first live exam, otherwise first exam
+          const liveExam = loadedExams.find((e) => e.isLive);
+          setSelectedCourseExamId(liveExam ? liveExam.id : loadedExams[0].id);
+        } else {
+          setSelectedCourseExamId(null);
+        }
+      } else {
+        setCourseExams([]);
+        setSelectedCourseExamId(null);
+      }
+    } catch (err) {
+      console.error('Failed to load course exams:', err);
+      setCourseExams([]);
+      setSelectedCourseExamId(null);
+    } finally {
+      setCourseExamsLoading(false);
+    }
+  };
+
   // Load Curriculum for a selected course
   const loadCurriculum = async (courseId: string) => {
+    if (!courseId) return;
+    // Clear stale exam selection immediately when switching courses
+    setCourseExams([]);
+    setSelectedCourseExamId(null);
     try {
       const token = localStorage.getItem('token');
       const [curriculumRes] = await Promise.all([
         axios.get(`http://localhost:5000/api/courses/${courseId}/curriculum`, {
           headers: { Authorization: `Bearer ${token}` }
         }),
-        fetchCourseProgress(courseId)
+        fetchCourseProgress(courseId),
+        fetchCourseExams(courseId)
       ]);
-      setSelectedCourse(curriculumRes.data.course);
-      setCurriculum(curriculumRes.data.modules);
+      const courseData = curriculumRes.data.course;
+      // Safety guard: ensure loaded course belongs to published non-archived catalog
+      if (courseData && (!isEligibleCourse(courseData) && courseData.status !== 'PUBLISHED')) {
+        console.warn('Attempted to load non-published course in learning viewer:', courseData.title);
+        setSelectedCourse(null);
+        setCurriculum(null);
+        setActiveLesson(null);
+        return;
+      }
+      setSelectedCourse(courseData);
+      setCurriculum(curriculumRes.data.modules || []);
       // Select first lesson by default
-      if (curriculumRes.data.modules[0]?.lessons[0]) {
+      if (curriculumRes.data.modules?.[0]?.lessons?.[0]) {
         setActiveLesson(curriculumRes.data.modules[0].lessons[0]);
+      } else {
+        setActiveLesson(null);
       }
     } catch (err) {
       console.error(err);
@@ -311,7 +369,7 @@ export const CoursesScreen: React.FC<CoursesScreenProps> = ({ onBackToDashboard,
               }}
             >
               {filteredCourses.length === 0 ? (
-                <option value="" disabled>No matching courses</option>
+                <option value="" disabled>No published courses available</option>
               ) : (
                 filteredCourses.map((c) => (
                   <option key={c.id} value={c.id}>
@@ -321,17 +379,106 @@ export const CoursesScreen: React.FC<CoursesScreenProps> = ({ onBackToDashboard,
               )}
             </select>
 
-            {onTakeExam && availableExamId && (
-              <button
-                onClick={() => onTakeExam(availableExamId)}
-                style={{
-                  background: '#2563eb', color: '#ffffff', padding: '0.5rem 1.25rem',
-                  borderRadius: '0.5rem', border: 'none', cursor: 'pointer', fontWeight: 700,
-                  display: 'flex', alignItems: 'center', gap: '0.4rem'
-                }}
-              >
-                Take Timed Exam Now →
-              </button>
+            {/* Course-Specific Exam Launch Section (Option B) */}
+            {onTakeExam && (
+              courseExamsLoading ? (
+                <button
+                  disabled
+                  style={{
+                    background: '#f1f5f9', color: '#94a3b8', padding: '0.5rem 1rem',
+                    borderRadius: '0.5rem', border: '1px solid #e2e8f0', cursor: 'not-allowed',
+                    fontWeight: 600, fontSize: '0.85rem'
+                  }}
+                >
+                  Checking Course Exams...
+                </button>
+              ) : courseExams.length === 0 ? (
+                <button
+                  disabled
+                  style={{
+                    background: '#f8fafc', color: '#94a3b8', padding: '0.5rem 1.1rem',
+                    borderRadius: '0.5rem', border: '1px solid #e2e8f0', cursor: 'not-allowed',
+                    fontWeight: 600, fontSize: '0.85rem'
+                  }}
+                  title="No exams are assigned to this course. Grand Model Tests are available on the main Dashboard."
+                >
+                  No Course Exam Assigned
+                </button>
+              ) : courseExams.length === 1 ? (
+                <button
+                  onClick={() => selectedCourseExamId && onTakeExam(selectedCourseExamId)}
+                  disabled={user?.role === 'STUDENT' && !courseExams[0].canAttempt}
+                  style={{
+                    background: (user?.role === 'INSTRUCTOR' || user?.role === 'ADMIN')
+                      ? '#d97706'
+                      : (courseExams[0].canAttempt ? '#2563eb' : '#94a3b8'),
+                    color: '#ffffff',
+                    padding: '0.5rem 1.25rem',
+                    borderRadius: '0.5rem',
+                    border: 'none',
+                    cursor: (user?.role === 'STUDENT' && !courseExams[0].canAttempt) ? 'not-allowed' : 'pointer',
+                    fontWeight: 700,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.4rem',
+                    fontSize: '0.88rem'
+                  }}
+                  title={(user?.role === 'INSTRUCTOR' || user?.role === 'ADMIN')
+                    ? 'Simulated non-persistent test session (No official database attempt)'
+                    : (courseExams[0].canAttempt
+                        ? `Start official timed candidate exam (${courseExams[0].attemptsRemaining} attempts left)`
+                        : 'Exam is not currently open or attempt limit reached')}
+                >
+                  {(user?.role === 'INSTRUCTOR' || user?.role === 'ADMIN') ? (
+                    <>Preview Exam (Instructor Test Mode) →</>
+                  ) : (
+                    <>Take Timed Exam Now →</>
+                  )}
+                </button>
+              ) : (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <select
+                    value={selectedCourseExamId || ''}
+                    onChange={(e) => setSelectedCourseExamId(e.target.value)}
+                    style={{
+                      background: '#ffffff', border: '1px solid #cbd5e1', color: '#0f172a',
+                      padding: '0.45rem 0.75rem', borderRadius: '0.5rem', fontWeight: 600,
+                      fontSize: '0.82rem', maxWidth: '240px', outline: 'none'
+                    }}
+                  >
+                    {courseExams.map((ex) => (
+                      <option key={ex.id} value={ex.id}>
+                        {ex.title} ({ex.durationMinutes}m | {ex.totalMarks}m)
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    onClick={() => selectedCourseExamId && onTakeExam(selectedCourseExamId)}
+                    style={{
+                      background: (user?.role === 'INSTRUCTOR' || user?.role === 'ADMIN') ? '#d97706' : '#2563eb',
+                      color: '#ffffff',
+                      padding: '0.45rem 1rem',
+                      borderRadius: '0.5rem',
+                      border: 'none',
+                      cursor: 'pointer',
+                      fontWeight: 700,
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '0.35rem',
+                      fontSize: '0.82rem'
+                    }}
+                    title={(user?.role === 'INSTRUCTOR' || user?.role === 'ADMIN')
+                      ? 'Simulated non-persistent test session'
+                      : 'Start official timed candidate exam'}
+                  >
+                    {(user?.role === 'INSTRUCTOR' || user?.role === 'ADMIN') ? (
+                      <>Preview Selected →</>
+                    ) : (
+                      <>Take Selected →</>
+                    )}
+                  </button>
+                </div>
+              )
             )}
 
             <button
@@ -362,7 +509,7 @@ export const CoursesScreen: React.FC<CoursesScreenProps> = ({ onBackToDashboard,
                 Course Search & Filter
               </span>
               <span style={{ fontSize: '0.8rem', background: '#eff6ff', color: '#1d4ed8', border: '1px solid #bfdbfe', padding: '0.15rem 0.55rem', borderRadius: '1rem', fontWeight: 600 }}>
-                Showing {filteredCourses.length} of {courses.length} Courses
+                Showing {filteredCourses.length} of {courses.length} Published Courses
               </span>
             </div>
             {(searchQuery || selectedCategory !== 'ALL' || selectedLevel !== 'ALL') && (
@@ -522,31 +669,34 @@ export const CoursesScreen: React.FC<CoursesScreenProps> = ({ onBackToDashboard,
           >
             <Search style={{ width: '3rem', height: '3rem', color: '#94a3b8', margin: '0 auto 1rem' }} />
             <h3 style={{ fontSize: '1.2rem', fontWeight: 700, color: '#0f172a', marginBottom: '0.5rem' }}>
-              No Courses Match Your Filter
+              {courses.length === 0 ? 'No Published Courses Available' : 'No Courses Match Your Filter'}
             </h3>
             <p style={{ color: '#64748b', fontSize: '0.9rem', maxWidth: '450px', margin: '0 auto 1.25rem' }}>
-              {searchQuery ? `No courses found matching "${searchQuery}". ` : ''}
-              Try searching with different keywords or reset your filters to see all available courses.
+              {courses.length === 0
+                ? 'There are currently no published courses available in the learning syllabus. Please check back later or contact an administrator.'
+                : (searchQuery ? `No courses found matching "${searchQuery}". ` : '') + 'Try searching with different keywords or reset your filters to see all published courses.'}
             </p>
-            <button
-              onClick={() => {
-                setSearchQuery('');
-                setSelectedCategory('ALL');
-                setSelectedLevel('ALL');
-              }}
-              style={{
-                background: '#2563eb',
-                color: '#ffffff',
-                padding: '0.55rem 1.25rem',
-                borderRadius: '0.5rem',
-                border: 'none',
-                fontWeight: 600,
-                fontSize: '0.85rem',
-                cursor: 'pointer'
-              }}
-            >
-              Clear Filters & Show All Courses
-            </button>
+            {courses.length > 0 && (
+              <button
+                onClick={() => {
+                  setSearchQuery('');
+                  setSelectedCategory('ALL');
+                  setSelectedLevel('ALL');
+                }}
+                style={{
+                  background: '#2563eb',
+                  color: '#ffffff',
+                  padding: '0.55rem 1.25rem',
+                  borderRadius: '0.5rem',
+                  border: 'none',
+                  fontWeight: 600,
+                  fontSize: '0.85rem',
+                  cursor: 'pointer'
+                }}
+              >
+                Clear Filters & Show All Published Courses
+              </button>
+            )}
           </div>
         )}
 

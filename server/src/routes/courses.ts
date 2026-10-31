@@ -246,18 +246,18 @@ coursesRouter.get('/', authenticateToken, (req: Request, res: Response) => {
       whereClauses.push('c.instructor_id = ?');
       params.push(req.user.id);
     } else if (!isPrivileged) {
-      // If student passes mine=true, restrict to published
-      whereClauses.push("c.status = 'PUBLISHED'");
+      // If student passes mine=true, restrict to active published
+      whereClauses.push("c.status = 'PUBLISHED' AND COALESCE(c.is_archived, 0) = 0");
     }
-    // Admins with mine=true continue to have access to all courses
+    // Admins with mine=true continue to have access to all courses (including archived for management)
   } else {
     // Standard course catalog query
-    // Students can ONLY view PUBLISHED courses
+    // Students can ONLY view active PUBLISHED courses
     if (!isPrivileged) {
-      whereClauses.push("c.status = 'PUBLISHED'");
+      whereClauses.push("c.status = 'PUBLISHED' AND COALESCE(c.is_archived, 0) = 0");
     } else if (req.user?.role === 'INSTRUCTOR') {
-      // Instructors see all published plus their own draft courses
-      whereClauses.push("(c.status = 'PUBLISHED' OR c.instructor_id = ?)");
+      // Instructors see all active published plus their own active draft courses
+      whereClauses.push("(c.status = 'PUBLISHED' OR c.instructor_id = ?) AND COALESCE(c.is_archived, 0) = 0");
       params.push(req.user.id);
     }
   }
@@ -411,6 +411,44 @@ coursesRouter.delete('/:courseId', authenticateToken, requireRole('INSTRUCTOR', 
 
   db.prepare('DELETE FROM courses WHERE id = ?').run(courseId);
   res.json({ success: true, message: 'Course and curriculum deleted successfully.' });
+});
+
+// ==========================================
+// 2A. ARCHIVE & RESTORE APIS (Reversible Soft-Archival)
+// ==========================================
+coursesRouter.put('/:courseId/archive', authenticateToken, requireRole('ADMIN'), (req: Request, res: Response) => {
+  const { courseId } = req.params;
+  const course: any = db.prepare('SELECT * FROM courses WHERE id = ?').get(courseId);
+  if (!course) {
+    return res.status(404).json({ success: false, error: 'Course not found.' });
+  }
+  if (course.status === 'PUBLISHED') {
+    return res.status(400).json({ success: false, error: 'Cannot archive a published course. Unpublish to draft first.' });
+  }
+
+  db.prepare(`
+    UPDATE courses 
+    SET is_archived = 1, archived_at = (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    WHERE id = ?
+  `).run(courseId);
+
+  res.json({ success: true, message: 'Course archived successfully.' });
+});
+
+coursesRouter.put('/:courseId/restore', authenticateToken, requireRole('ADMIN'), (req: Request, res: Response) => {
+  const { courseId } = req.params;
+  const course: any = db.prepare('SELECT * FROM courses WHERE id = ?').get(courseId);
+  if (!course) {
+    return res.status(404).json({ success: false, error: 'Course not found.' });
+  }
+
+  db.prepare(`
+    UPDATE courses 
+    SET is_archived = 0, archived_at = NULL
+    WHERE id = ?
+  `).run(courseId);
+
+  res.json({ success: true, message: 'Course restored to active drafts successfully.' });
 });
 
 // ==========================================
@@ -1142,4 +1180,98 @@ coursesRouter.get('/:courseId/progress', authenticateToken, (req: Request, res: 
     completedLessonIds
   });
 });
+
+// ==========================================
+// 4. GET /api/courses/:courseId/exams - Course-Linked Exams
+// Option B: Complete Course-Based Exam Integration
+// ==========================================
+coursesRouter.get('/:courseId/exams', authenticateToken, (req: Request, res: Response) => {
+  const { courseId } = req.params;
+  const user = req.user!;
+  const isPrivileged = user.role === 'INSTRUCTOR' || user.role === 'ADMIN';
+
+  const course: any = db.prepare(`
+    SELECT id, title, title_bangla, instructor_id, status, is_archived
+    FROM courses
+    WHERE id = ?
+  `).get(courseId);
+
+  if (!course) {
+    return res.status(404).json({ success: false, error: 'Course not found.' });
+  }
+
+  // Student Access Control: Course must be PUBLISHED and NOT archived
+  if (!isPrivileged && (course.status !== 'PUBLISHED' || course.is_archived)) {
+    return res.status(403).json({
+      success: false,
+      error: 'This course is currently not accessible.'
+    });
+  }
+
+  // If instructor, enforce ownership unless course is published or user is admin
+  if (user.role === 'INSTRUCTOR' && course.instructor_id && course.instructor_id !== user.id && course.status !== 'PUBLISHED') {
+    return res.status(403).json({
+      success: false,
+      error: 'You do not have permission to view exams for this unpublished course.'
+    });
+  }
+
+  let query = `
+    SELECT e.id, e.title, e.title_bangla as titleBangla, e.description,
+           e.category, e.type, e.status, e.duration_minutes as durationMinutes,
+           e.total_marks as totalMarks, e.pass_marks as passMarks,
+           e.negative_marking_rate as negativeMarkingRate,
+           e.allowed_attempts as allowedAttempts,
+           e.starts_at as startsAt, e.ends_at as endsAt,
+           e.result_release_mode as resultReleaseMode,
+           e.integrity_enabled as integrityEnabled,
+           e.max_violations_allowed as maxViolationsAllowed,
+           e.created_by as createdBy, e.created_at as createdAt,
+           ce.sort_order as sortOrder, ce.is_required as isRequired,
+           (SELECT COUNT(*) FROM exam_questions eq WHERE eq.exam_id = e.id) as questionCount,
+           (SELECT COUNT(*) FROM attempts a WHERE a.exam_id = e.id AND a.user_id = ?) as attemptsUsed
+    FROM course_exams ce
+    JOIN exams e ON e.id = ce.exam_id
+    WHERE ce.course_id = ?
+  `;
+
+  const params: any[] = [user.id, courseId];
+
+  if (!isPrivileged) {
+    // Normal students only see published / live / scheduled / closed / results published exams
+    // Students NEVER see DRAFT exams!
+    query += ` AND e.status IN ('LIVE', 'SCHEDULED', 'CLOSED', 'RESULTS_PUBLISHED')`;
+  }
+
+  query += ` ORDER BY ce.sort_order ASC, e.created_at ASC`;
+
+  const rawExams = db.prepare(query).all(...params);
+
+  const now = new Date();
+  const exams = rawExams.map((e: any) => {
+    const examStart = new Date(e.startsAt);
+    const examEnd = new Date(e.endsAt);
+    const isLive = e.status === 'LIVE' && now >= examStart && now <= examEnd;
+    const attemptsRemaining = Math.max(0, e.allowedAttempts - e.attemptsUsed);
+    const canAttempt = isLive && attemptsRemaining > 0;
+
+    return {
+      ...e,
+      integrityEnabled: Boolean(e.integrityEnabled),
+      isRequired: Boolean(e.isRequired),
+      isLive,
+      canAttempt,
+      attemptsRemaining
+    };
+  });
+
+  res.json({
+    success: true,
+    courseId: course.id,
+    courseTitle: course.title,
+    count: exams.length,
+    exams
+  });
+});
+
 
