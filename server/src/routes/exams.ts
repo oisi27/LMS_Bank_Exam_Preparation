@@ -28,6 +28,7 @@ const examCreateSchema = z.object({
   integrityEnabled: z.boolean().default(true),
   maxViolationsAllowed: z.number().int().min(1).default(3),
   questionIds: z.array(z.string()).optional(),
+  courseIds: z.array(z.string()).optional(),
   sections: z.array(z.object({
     sectionName: z.string(),
     questionIds: z.array(z.string()),
@@ -197,12 +198,22 @@ examsRouter.get('/:id', authenticateToken, (req: Request, res: Response) => {
 
   const questionsSumMarks = questions.reduce((sum: number, q: any) => sum + (Number(q.marks) || 0), 0);
 
+  const linkedCourses = db.prepare(`
+    SELECT c.id, c.title, c.title_bangla as titleBangla, ce.sort_order as sortOrder, ce.is_required as isRequired
+    FROM course_exams ce
+    JOIN courses c ON c.id = ce.course_id
+    WHERE ce.exam_id = ?
+    ORDER BY ce.sort_order ASC
+  `).all(exam.id) as any[];
+
   res.json({
     success: true,
     exam: {
       ...exam,
       integrityEnabled: Boolean(exam.integrityEnabled),
       questionsSumMarks,
+      linkedCourses,
+      linkedCourseIds: linkedCourses.map((c: any) => c.id),
       questions
     }
   });
@@ -439,6 +450,22 @@ examsRouter.post('/', authenticateToken, requireRole('INSTRUCTOR', 'ADMIN'), (re
     }
   }
 
+  // Validate requested course mappings (if provided)
+  if (data.courseIds && data.courseIds.length > 0) {
+    for (const cId of data.courseIds) {
+      const course: any = db.prepare('SELECT id, title, instructor_id, status FROM courses WHERE id = ?').get(cId);
+      if (!course) {
+        return res.status(404).json({ success: false, error: `Referenced course does not exist: ${cId}` });
+      }
+      if (req.user?.role === 'INSTRUCTOR' && course.instructor_id && course.instructor_id !== req.user.id) {
+        return res.status(403).json({
+          success: false,
+          error: `Unauthorized: You cannot link an exam to course "${course.title}" because you are not the instructor of that course.`
+        });
+      }
+    }
+  }
+
   const examId = uuidv4();
 
   try {
@@ -505,6 +532,18 @@ examsRouter.post('/', authenticateToken, requireRole('INSTRUCTOR', 'ADMIN'), (re
             data.negativeMarkingRate,
             orderIndex++
           );
+        }
+      }
+
+      // Handle course mapping if provided
+      if (data.courseIds && data.courseIds.length > 0) {
+        const insertCe = db.prepare(`
+          INSERT INTO course_exams (id, course_id, exam_id, sort_order, is_required)
+          VALUES (?, ?, ?, ?, 0)
+        `);
+        let ceSortOrder = 0;
+        for (const cId of data.courseIds) {
+          insertCe.run(uuidv4(), cId, examId, ceSortOrder++);
         }
       }
     })();
@@ -642,6 +681,24 @@ examsRouter.put('/:id', authenticateToken, requireRole('INSTRUCTOR', 'ADMIN'), (
     }
   }
 
+  // Safety check 4: If courseIds provided, validate all requested courses exist and enforce dual ownership
+  const shouldUpdateCourseMappings = data.courseIds !== undefined;
+  if (shouldUpdateCourseMappings) {
+    const targetCourseIds = data.courseIds as string[];
+    for (const cId of targetCourseIds) {
+      const course: any = db.prepare('SELECT id, title, instructor_id, status FROM courses WHERE id = ?').get(cId);
+      if (!course) {
+        return res.status(404).json({ success: false, error: `Referenced course does not exist: ${cId}` });
+      }
+      if (req.user?.role === 'INSTRUCTOR' && course.instructor_id && course.instructor_id !== req.user.id) {
+        return res.status(403).json({
+          success: false,
+          error: `Unauthorized: You cannot link an exam to course "${course.title}" because you are not the instructor of that course.`
+        });
+      }
+    }
+  }
+
   try {
     const updateTx = db.transaction(() => {
       // 1. Update exams table metadata
@@ -726,6 +783,29 @@ examsRouter.put('/:id', authenticateToken, requireRole('INSTRUCTOR', 'ADMIN'), (
           if (sumRow && sumRow.total > 0) {
             db.prepare('UPDATE exams SET total_marks = ? WHERE id = ?').run(sumRow.total, req.params.id);
           }
+        }
+      }
+
+      // 3. If courseIds provided, apply surgical diff to course_exams
+      if (shouldUpdateCourseMappings) {
+        const targetCourseIds = data.courseIds as string[];
+        const currentMappings: any[] = db.prepare('SELECT course_id FROM course_exams WHERE exam_id = ?').all(req.params.id);
+        const currentCourseIds = new Set(currentMappings.map((m) => m.course_id));
+        const newCourseIds = new Set(targetCourseIds);
+
+        const toRemove = [...currentCourseIds].filter((id) => !newCourseIds.has(id));
+        const toAdd = [...newCourseIds].filter((id) => !currentCourseIds.has(id));
+
+        for (const removeId of toRemove) {
+          db.prepare('DELETE FROM course_exams WHERE exam_id = ? AND course_id = ?').run(req.params.id, removeId);
+        }
+
+        let nextSortOrder = currentMappings.length;
+        for (const addId of toAdd) {
+          db.prepare(`
+            INSERT INTO course_exams (id, course_id, exam_id, sort_order, is_required)
+            VALUES (?, ?, ?, ?, 0)
+          `).run(uuidv4(), addId, req.params.id, nextSortOrder++);
         }
       }
     });

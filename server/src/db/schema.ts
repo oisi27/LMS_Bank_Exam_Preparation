@@ -224,6 +224,8 @@ export function initDatabase() {
       instructor_id TEXT REFERENCES users(id),
       status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT', 'PENDING_REVIEW', 'REJECTED', 'PUBLISHED')),
       rejection_reason TEXT,
+      is_archived INTEGER NOT NULL DEFAULT 0,
+      archived_at TEXT,
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
       updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
     );
@@ -274,6 +276,20 @@ export function initDatabase() {
 
     CREATE INDEX IF NOT EXISTS idx_lesson_progress_user ON lesson_progress(user_id);
     CREATE INDEX IF NOT EXISTS idx_lesson_progress_lesson ON lesson_progress(lesson_id);
+
+    -- 19. Course Exams Junction Table (Option B: Complete Course-Based Exam Integration)
+    CREATE TABLE IF NOT EXISTS course_exams (
+      id TEXT PRIMARY KEY,
+      course_id TEXT NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+      exam_id TEXT NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      is_required INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+      UNIQUE(course_id, exam_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_course_exams_course ON course_exams(course_id);
+    CREATE INDEX IF NOT EXISTS idx_course_exams_exam ON course_exams(exam_id);
   `);
 
   // Safe additive schema migrations for existing databases
@@ -330,6 +346,16 @@ export function initDatabase() {
     if (!attColNames.has('time_extended_minutes')) {
       db.prepare(`ALTER TABLE attempts ADD COLUMN time_extended_minutes INTEGER NOT NULL DEFAULT 0`).run();
     }
+
+    const coursesTableInfo = db.prepare(`PRAGMA table_info(courses)`).all() as any[];
+    const coursesColNames = new Set(coursesTableInfo.map((col) => col.name));
+
+    if (!coursesColNames.has('is_archived')) {
+      db.prepare(`ALTER TABLE courses ADD COLUMN is_archived INTEGER NOT NULL DEFAULT 0`).run();
+    }
+    if (!coursesColNames.has('archived_at')) {
+      db.prepare(`ALTER TABLE courses ADD COLUMN archived_at TEXT`).run();
+    }
   } catch (govMigErr) {
     console.warn('[DB MIGRATION WARNING - ADMIN GOVERNANCE]:', govMigErr);
   }
@@ -358,6 +384,8 @@ export function initDatabase() {
               instructor_id TEXT REFERENCES users(id),
               status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT', 'PENDING_REVIEW', 'REJECTED', 'PUBLISHED')),
               rejection_reason TEXT,
+              is_archived INTEGER NOT NULL DEFAULT 0,
+              archived_at TEXT,
               created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
               updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
             )

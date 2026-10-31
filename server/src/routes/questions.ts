@@ -534,7 +534,7 @@ questionsRouter.delete('/:id', authenticateToken, requireRole('INSTRUCTOR', 'ADM
 // 6. POST /api/questions/import-csv - Atomic Bulk CSV Importer
 // ==========================================
 questionsRouter.post('/import-csv', authenticateToken, requireRole('INSTRUCTOR', 'ADMIN'), (req: Request, res: Response) => {
-  const { csvData } = req.body;
+  const { csvData, allowPartial } = req.body;
   if (!csvData || typeof csvData !== 'string') {
     return res.status(400).json({ success: false, error: 'Valid csvData string is required.' });
   }
@@ -551,10 +551,11 @@ questionsRouter.post('/import-csv', authenticateToken, requireRole('INSTRUCTOR',
   // subject,chapter,topic,difficulty,type,prompt,promptBangla,optA,optB,optC,optD,correctOpt,explanation
   const errors: { row: number; error: string }[] = [];
   const validRows: any[] = [];
+  const batchPrompts = new Set<string>();
 
   for (let i = 1; i < lines.length; i++) {
     const rawLine = lines[i];
-    // CSV parser accounting for quoted commas
+    // CSV parser accounting for quoted commas and escaped quotes
     const regex = /(?:^|,)(\"(?:[^\"]+|\"\")*\"|[^,]*)/g;
     const matches: string[] = [];
     let match;
@@ -584,8 +585,40 @@ questionsRouter.post('/import-csv', authenticateToken, requireRole('INSTRUCTOR',
     }
 
     const normalizedDiff = ['EASY', 'MEDIUM', 'HARD'].includes(difficulty?.toUpperCase()) ? difficulty.toUpperCase() : 'MEDIUM';
-    const normalizedType = ['SINGLE_MCQ', 'MULTI_SELECT'].includes(type?.toUpperCase()) ? type.toUpperCase() : 'SINGLE_MCQ';
+    const normalizedType = ['SINGLE_MCQ', 'MULTI_SELECT', 'TRUE_FALSE'].includes(type?.toUpperCase()) ? type.toUpperCase() : 'SINGLE_MCQ';
     const validCorrectKeys = correctOpt.toUpperCase().split('|').map((k) => k.trim());
+
+    // Validate that correct answer key exists among provided options
+    const optionMap: Record<string, string> = { A: optA, B: optB };
+    if (optC) optionMap.A = optA;
+    if (optC) optionMap.C = optC;
+    if (optD) optionMap.D = optD;
+
+    const invalidCorrectKeys = validCorrectKeys.filter((k) => !optionMap[k] || optionMap[k].trim() === '');
+    if (invalidCorrectKeys.length > 0) {
+      errors.push({ row: i + 1, error: `Correct option key "${invalidCorrectKeys.join(', ')}" refers to an empty or missing option choice.` });
+      continue;
+    }
+
+    if (normalizedType === 'SINGLE_MCQ' || normalizedType === 'TRUE_FALSE') {
+      if (validCorrectKeys.length !== 1) {
+        errors.push({ row: i + 1, error: `${normalizedType} must have exactly 1 correct answer (found ${validCorrectKeys.length}: ${correctOpt}).` });
+        continue;
+      }
+    } else if (normalizedType === 'MULTI_SELECT') {
+      if (validCorrectKeys.length < 1) {
+        errors.push({ row: i + 1, error: 'MULTI_SELECT must have at least 1 correct answer.' });
+        continue;
+      }
+    }
+
+    // Check for internal duplicate within this CSV batch
+    const normalizedPrompt = prompt.trim();
+    if (batchPrompts.has(normalizedPrompt)) {
+      errors.push({ row: i + 1, error: `Duplicate question prompt in CSV batch: "${prompt.substring(0, 40)}..."` });
+      continue;
+    }
+    batchPrompts.add(normalizedPrompt);
 
     validRows.push({
       subject,
@@ -593,7 +626,7 @@ questionsRouter.post('/import-csv', authenticateToken, requireRole('INSTRUCTOR',
       topic: topic || 'General',
       difficulty: normalizedDiff,
       type: normalizedType,
-      prompt,
+      prompt: normalizedPrompt,
       promptBangla: promptBangla || null,
       explanation: explanation || null,
       options: [
@@ -605,6 +638,16 @@ questionsRouter.post('/import-csv', authenticateToken, requireRole('INSTRUCTOR',
     });
   }
 
+  // Strict mode: if allowPartial is false and there are errors, reject entire batch atomically
+  if (allowPartial !== true && errors.length > 0) {
+    return res.status(400).json({
+      success: false,
+      error: `CSV validation failed with ${errors.length} error(s). Please review and correct the file.`,
+      validationErrors: errors,
+      validRowCount: validRows.length
+    });
+  }
+
   if (validRows.length === 0) {
     return res.status(400).json({
       success: false,
@@ -613,15 +656,23 @@ questionsRouter.post('/import-csv', authenticateToken, requireRole('INSTRUCTOR',
     });
   }
 
+  // Admin approval governance:
+  // Admins get auto-approved questions (is_approved = 1)
+  // Instructors get questions marked PENDING APPROVAL (is_approved = 0)
+  const isApproved = req.user?.role === 'ADMIN' ? 1 : 0;
+  const importedQuestionIds: string[] = [];
+
   // Atomic batch insertion via SQLite Transaction
   try {
-    let importedCount = 0;
+    let newlyCreatedCount = 0;
+    let reusedCount = 0;
+
     db.transaction(() => {
       const insertQ = db.prepare(`
         INSERT INTO questions (
           id, subject, chapter, topic, difficulty, type,
           prompt, prompt_bangla, explanation, default_marks, default_negative_marks, is_approved, author_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1.0, 0.25, 1, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1.0, 0.25, ?, ?)
       `);
 
       const insertOpt = db.prepare(`
@@ -630,6 +681,20 @@ questionsRouter.post('/import-csv', authenticateToken, requireRole('INSTRUCTOR',
       `);
 
       for (const row of validRows) {
+        // Privacy & Ownership Safeguard:
+        // Only reuse if the question with this exact prompt was authored by the CURRENT user.
+        // Never reuse or link to an unapproved question authored by another instructor.
+        const existingOwnQuestion: any = db.prepare(`
+          SELECT id FROM questions 
+          WHERE prompt = ? AND author_id = ?
+        `).get(row.prompt, req.user!.id);
+
+        if (existingOwnQuestion) {
+          importedQuestionIds.push(existingOwnQuestion.id);
+          reusedCount++;
+          continue;
+        }
+
         const qId = uuidv4();
         insertQ.run(
           qId,
@@ -641,6 +706,7 @@ questionsRouter.post('/import-csv', authenticateToken, requireRole('INSTRUCTOR',
           row.prompt,
           row.promptBangla,
           row.explanation,
+          isApproved,
           req.user!.id
         );
 
@@ -648,14 +714,19 @@ questionsRouter.post('/import-csv', authenticateToken, requireRole('INSTRUCTOR',
           insertOpt.run(uuidv4(), qId, opt.key, opt.text, opt.isCorrect ? 1 : 0, idx);
         });
 
-        importedCount++;
+        importedQuestionIds.push(qId);
+        newlyCreatedCount++;
       }
     })();
 
     res.json({
       success: true,
-      message: `Successfully imported ${importedCount} questions into Question Bank.`,
-      importedCount,
+      message: `Successfully processed ${validRows.length} questions (${newlyCreatedCount} new, ${reusedCount} existing).`,
+      importedCount: validRows.length,
+      newlyCreatedCount,
+      reusedCount,
+      importedQuestionIds,
+      isApproved: Boolean(isApproved),
       skippedErrors: errors.length > 0 ? errors : undefined
     });
   } catch (err: any) {

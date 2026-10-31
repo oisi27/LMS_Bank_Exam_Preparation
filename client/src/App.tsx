@@ -15,6 +15,7 @@ import { InstructorExamBuilder } from './components/InstructorExamBuilder';
 import { InstructorDashboard } from './components/InstructorDashboard';
 import { AdminDashboard } from './components/AdminDashboard';
 import { LandingPage } from './components/LandingPage';
+import { InstructorExamTestModal } from './components/InstructorExamTestModal';
 
 function AppContent() {
   const { user, logout } = useAuth();
@@ -23,6 +24,7 @@ function AppContent() {
   const [lang, setLang] = useState<'en' | 'bn'>('en');
   const [adminInitialTab, setAdminInitialTab] = useState<'USERS' | 'LIVE_MONITOR' | 'AUDIT_LOGS' | 'COURSE_MODERATION' | 'GRADE_OVERRIDE' | undefined>(undefined);
   const [activeExamId, setActiveExamId] = useState<string | null>(null);
+  const [instructorTestExamId, setInstructorTestExamId] = useState<string | null>(null);
   const [lastGrade, setLastGrade] = useState<any>(null);
   const [reviewAttemptId, setReviewAttemptId] = useState<string | null>(null);
   const [selectedCourseId, setSelectedCourseId] = useState<string | null>(null);
@@ -58,8 +60,12 @@ function AppContent() {
   }
 
   const handleStartExam = (examId: string) => {
-    setActiveExamId(examId);
-    setCurrentView('exam');
+    if (user?.role === 'INSTRUCTOR' || user?.role === 'ADMIN') {
+      setInstructorTestExamId(examId);
+    } else {
+      setActiveExamId(examId);
+      setCurrentView('exam');
+    }
   };
 
   const handleContinueCourse = (courseId: string) => {
@@ -190,6 +196,14 @@ function AppContent() {
             initialTab={adminInitialTab}
           />
         </ProtectedRoute>
+      )}
+
+      {/* Non-Persistent Instructor Test Mode Simulation (Zero Database Footprint) */}
+      {instructorTestExamId && (
+        <InstructorExamTestModal
+          examId={instructorTestExamId}
+          onClose={() => setInstructorTestExamId(null)}
+        />
       )}
     </AppLayout>
   );

@@ -3,6 +3,7 @@ import axios from 'axios';
 import { Card, Button, Badge } from '../design-system';
 import { useAuth } from '../context/AuthContext';
 import { MathRenderer } from './MathRenderer';
+import { InstructorExamTestModal } from './InstructorExamTestModal';
 import {
   Plus,
   Search,
@@ -25,7 +26,11 @@ import {
   ShieldAlert,
   Award,
   RefreshCw,
-  AlertTriangle
+  AlertTriangle,
+  Upload,
+  Download,
+  Check,
+  FileText
 } from 'lucide-react';
 
 interface SubmissionItem {
@@ -79,6 +84,8 @@ interface ExamItem {
   createdAt: string;
   questionCount: number;
   questionsSumMarks?: number;
+  linkedCourses?: { id: string; title: string }[];
+  linkedCourseIds?: string[];
 }
 
 interface Question {
@@ -98,6 +105,7 @@ export const InstructorExamBuilder: React.FC = () => {
   const { user } = useAuth();
   const [exams, setExams] = useState<ExamItem[]>([]);
   const [selectedExam, setSelectedExam] = useState<ExamItem | null>(null);
+  const [availableCourses, setAvailableCourses] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
   const [error, setError] = useState('');
@@ -120,7 +128,8 @@ export const InstructorExamBuilder: React.FC = () => {
     negativeMarkingRate: 0.25,
     allowedAttempts: 1,
     startsAt: new Date().toISOString().slice(0, 16),
-    endsAt: new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString().slice(0, 16)
+    endsAt: new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString().slice(0, 16),
+    courseIds: [] as string[]
   });
 
   // Question Selector Modal state
@@ -131,6 +140,41 @@ export const InstructorExamBuilder: React.FC = () => {
   const [qDifficulty, setQDifficulty] = useState('');
   const [selectedQuestionIds, setSelectedQuestionIds] = useState<string[]>([]);
   const [currentExamQuestions, setCurrentExamQuestions] = useState<any[]>([]);
+
+  // 3-Tab Question Hub Modal states
+  const [questionHubTab, setQuestionHubTab] = useState<'BANK' | 'MANUAL' | 'CSV'>('BANK');
+  const [initialAssignedIds, setInitialAssignedIds] = useState<string[]>([]);
+  const [showUnsavedConfirm, setShowUnsavedConfirm] = useState(false);
+
+  // Manual Question Creation Form state
+  const [manualSubject, setManualSubject] = useState('English Language & Literature');
+  const [manualChapter, setManualChapter] = useState('Grammar');
+  const [manualTopic, setManualTopic] = useState('');
+  const [manualDifficulty, setManualDifficulty] = useState<'EASY' | 'MEDIUM' | 'HARD'>('MEDIUM');
+  const [manualType, setManualType] = useState<'SINGLE_MCQ' | 'MULTI_SELECT'>('SINGLE_MCQ');
+  const [manualPrompt, setManualPrompt] = useState('');
+  const [manualPromptBangla, setManualPromptBangla] = useState('');
+  const [manualExplanation, setManualExplanation] = useState('');
+  const [manualExplanationBangla, setManualExplanationBangla] = useState('');
+  const [manualOptions, setManualOptions] = useState([
+    { optionKey: 'A', text: '', textBangla: '', isCorrect: true },
+    { optionKey: 'B', text: '', textBangla: '', isCorrect: false },
+    { optionKey: 'C', text: '', textBangla: '', isCorrect: false },
+    { optionKey: 'D', text: '', textBangla: '', isCorrect: false }
+  ]);
+  const [manualLoading, setManualLoading] = useState(false);
+  const [manualError, setManualError] = useState('');
+  const [manualSuccess, setManualSuccess] = useState('');
+
+  // CSV Import state
+  const [csvFile, setCsvFile] = useState<File | null>(null);
+  const [csvRawText, setCsvRawText] = useState('');
+  const [csvParsedRows, setCsvParsedRows] = useState<any[]>([]);
+  const [csvRowErrors, setCsvRowErrors] = useState<{ row: number; error: string }[]>([]);
+  const [csvValidCount, setCsvValidCount] = useState(0);
+  const [csvImportLoading, setCsvImportLoading] = useState(false);
+  const [csvImportError, setCsvImportError] = useState('');
+  const [csvImportSuccess, setCsvImportSuccess] = useState('');
 
   // Workspace View Tab & Submissions Review state
   const [workspaceTab, setWorkspaceTab] = useState<'QUESTIONS' | 'SUBMISSIONS'>('QUESTIONS');
@@ -171,6 +215,23 @@ export const InstructorExamBuilder: React.FC = () => {
     }
   };
 
+  const fetchCourses = async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const url = user?.role === 'ADMIN'
+        ? 'http://localhost:5000/api/courses'
+        : 'http://localhost:5000/api/courses?mine=true';
+      const res = await axios.get(url, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (res.data.success) {
+        setAvailableCourses(res.data.courses || []);
+      }
+    } catch (err: any) {
+      console.error('Failed to load courses for exam builder:', err);
+    }
+  };
+
   const fetchExamDetails = async (examId: string) => {
     try {
       const token = localStorage.getItem('token');
@@ -195,7 +256,8 @@ export const InstructorExamBuilder: React.FC = () => {
         params: {
           search: qSearch || undefined,
           subject: qSubject || undefined,
-          difficulty: qDifficulty || undefined
+          difficulty: qDifficulty || undefined,
+          pageSize: 100
         }
       });
       if (res.data.success) {
@@ -211,6 +273,268 @@ export const InstructorExamBuilder: React.FC = () => {
     } catch (err: any) {
       console.error('Error fetching questions:', err);
     }
+  };
+
+  const handleOpenQuestionModal = () => {
+    const currentIds = currentExamQuestions.map((q: any) => q.questionId || q.id);
+    setSelectedQuestionIds(currentIds);
+    setInitialAssignedIds(currentIds);
+    setQuestionHubTab('BANK');
+    setShowUnsavedConfirm(false);
+    setManualError('');
+    setManualSuccess('');
+    setCsvImportError('');
+    setCsvImportSuccess('');
+    setIsQuestionModalOpen(true);
+    fetchAvailableQuestions();
+  };
+
+  const handleCloseQuestionModal = () => {
+    const isChanged = JSON.stringify(selectedQuestionIds.slice().sort()) !== JSON.stringify(initialAssignedIds.slice().sort());
+    if (isChanged) {
+      setShowUnsavedConfirm(true);
+    } else {
+      setIsQuestionModalOpen(false);
+    }
+  };
+
+  const handleConfirmDiscardAssignments = () => {
+    setSelectedQuestionIds(initialAssignedIds);
+    setShowUnsavedConfirm(false);
+    setIsQuestionModalOpen(false);
+  };
+
+  const handleManualOptionChange = (idx: number, field: string, value: any) => {
+    const updated = [...manualOptions];
+    if (field === 'isCorrect' && manualType === 'SINGLE_MCQ') {
+      updated.forEach((opt, i) => {
+        opt.isCorrect = i === idx;
+      });
+    } else {
+      (updated[idx] as any)[field] = value;
+    }
+    setManualOptions(updated);
+  };
+
+  const handleCreateManualQuestion = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setManualError('');
+    setManualSuccess('');
+
+    if (!manualPrompt.trim()) {
+      setManualError('Question prompt is required.');
+      return;
+    }
+    if (manualOptions.some((o) => !o.text.trim())) {
+      setManualError('All options (A, B, C, D) must have text.');
+      return;
+    }
+    const correctCount = manualOptions.filter((o) => o.isCorrect).length;
+    if (manualType === 'SINGLE_MCQ' && correctCount !== 1) {
+      setManualError('Single MCQ must have exactly 1 correct answer.');
+      return;
+    }
+    if (manualType === 'MULTI_SELECT' && correctCount < 1) {
+      setManualError('Multi-select question must have at least 1 correct answer.');
+      return;
+    }
+
+    setManualLoading(true);
+    try {
+      const token = localStorage.getItem('token');
+      const payload = {
+        subject: manualSubject,
+        chapter: manualChapter || 'General',
+        topic: manualTopic.trim() || 'General',
+        difficulty: manualDifficulty,
+        type: manualType,
+        prompt: manualPrompt.trim(),
+        promptBangla: manualPromptBangla.trim() || undefined,
+        explanation: manualExplanation.trim() || undefined,
+        explanationBangla: manualExplanationBangla.trim() || undefined,
+        defaultMarks: 1.0,
+        defaultNegativeMarks: selectedExam?.negativeMarkingRate || 0.25,
+        options: manualOptions.map((o) => ({
+          optionKey: o.optionKey,
+          text: o.text.trim(),
+          textBangla: o.textBangla.trim() || undefined,
+          isCorrect: o.isCorrect
+        }))
+      };
+
+      const res = await axios.post('http://localhost:5000/api/questions', payload, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+
+      if (res.data.success && res.data.questionId) {
+        const newId = res.data.questionId;
+        setSelectedQuestionIds((prev) => (prev.includes(newId) ? prev : [...prev, newId]));
+        setManualSuccess('Question created (Pending Admin Review) and staged for this exam!');
+        setManualPrompt('');
+        setManualPromptBangla('');
+        setManualExplanation('');
+        setManualExplanationBangla('');
+        setManualOptions([
+          { optionKey: 'A', text: '', textBangla: '', isCorrect: true },
+          { optionKey: 'B', text: '', textBangla: '', isCorrect: false },
+          { optionKey: 'C', text: '', textBangla: '', isCorrect: false },
+          { optionKey: 'D', text: '', textBangla: '', isCorrect: false }
+        ]);
+        await fetchAvailableQuestions();
+      }
+    } catch (err: any) {
+      setManualError(err.response?.data?.error || 'Failed to create question.');
+    } finally {
+      setManualLoading(false);
+    }
+  };
+
+  const handleCsvFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setCsvImportError('');
+    setCsvImportSuccess('');
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setCsvFile(file);
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const text = event.target?.result as string;
+      setCsvRawText(text || '');
+      preValidateCsv(text || '');
+    };
+    reader.readAsText(file);
+  };
+
+  const preValidateCsv = (text: string) => {
+    const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+    if (lines.length < 2) {
+      setCsvRowErrors([{ row: 1, error: 'CSV must contain a header row and at least 1 question record.' }]);
+      setCsvParsedRows([]);
+      setCsvValidCount(0);
+      return;
+    }
+
+    const errors: { row: number; error: string }[] = [];
+    const valid: any[] = [];
+    const seenPrompts = new Set<string>();
+
+    for (let i = 1; i < lines.length; i++) {
+      const rawLine = lines[i];
+      const regex = /(?:^|,)(\"(?:[^\"]+|\"\")*\"|[^,]*)/g;
+      const matches: string[] = [];
+      let match;
+      while ((match = regex.exec(rawLine)) !== null) {
+        let val = match[1] || '';
+        if (val.startsWith('"') && val.endsWith('"')) {
+          val = val.slice(1, -1).replace(/""/g, '"');
+        }
+        matches.push(val.trim());
+        if (regex.lastIndex >= rawLine.length) break;
+      }
+
+      if (matches.length < 12) {
+        errors.push({ row: i + 1, error: `Incomplete column count (${matches.length} found, expected at least 12)` });
+        continue;
+      }
+
+      const [subject, chapter, topic, difficulty, type, prompt, promptBangla, optA, optB, optC, optD, correctOpt] = matches;
+      if (!subject || !chapter || !prompt || !optA || !optB || !correctOpt) {
+        errors.push({ row: i + 1, error: 'Missing mandatory fields (subject, chapter, prompt, optA, optB, correctOpt)' });
+        continue;
+      }
+
+      const correctKeys = correctOpt.toUpperCase().split('|').map((k) => k.trim());
+      const optionMap: Record<string, string> = { A: optA, B: optB };
+      if (optC) optionMap.C = optC;
+      if (optD) optionMap.D = optD;
+
+      const invalidKeys = correctKeys.filter((k) => !optionMap[k] || optionMap[k].trim() === '');
+      if (invalidKeys.length > 0) {
+        errors.push({ row: i + 1, error: `Correct option key "${invalidKeys.join(', ')}" refers to an empty choice.` });
+        continue;
+      }
+
+      if (seenPrompts.has(prompt.trim())) {
+        errors.push({ row: i + 1, error: `Duplicate prompt within file: "${prompt.substring(0, 30)}..."` });
+        continue;
+      }
+      seenPrompts.add(prompt.trim());
+
+      valid.push({
+        rowNumber: i + 1,
+        subject,
+        chapter,
+        topic: topic || 'General',
+        difficulty: difficulty || 'MEDIUM',
+        type: type || 'SINGLE_MCQ',
+        prompt,
+        promptBangla,
+        correctOpt,
+        optA,
+        optB,
+        optC,
+        optD
+      });
+    }
+
+    setCsvRowErrors(errors);
+    setCsvParsedRows(valid);
+    setCsvValidCount(valid.length);
+  };
+
+  const handleImportCsvQuestions = async () => {
+    if (!csvRawText || csvValidCount === 0) {
+      setCsvImportError('No valid questions to import.');
+      return;
+    }
+
+    setCsvImportLoading(true);
+    setCsvImportError('');
+    setCsvImportSuccess('');
+
+    try {
+      const token = localStorage.getItem('token');
+      const res = await axios.post(
+        'http://localhost:5000/api/questions/import-csv',
+        { csvData: csvRawText, allowPartial: true },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+
+      if (res.data.success) {
+        const newIds: string[] = res.data.importedQuestionIds || [];
+        if (newIds.length > 0) {
+          setSelectedQuestionIds((prev) => Array.from(new Set([...prev, ...newIds])));
+        }
+        setCsvImportSuccess(
+          `Successfully imported ${res.data.importedCount} questions (${user?.role === 'ADMIN' ? 'Approved' : 'Pending Admin Review'}) and staged them for this exam!`
+        );
+        setCsvFile(null);
+        setCsvRawText('');
+        setCsvParsedRows([]);
+        setCsvRowErrors([]);
+        setCsvValidCount(0);
+        await fetchAvailableQuestions();
+      }
+    } catch (err: any) {
+      setCsvImportError(err.response?.data?.error || 'Failed to import CSV.');
+    } finally {
+      setCsvImportLoading(false);
+    }
+  };
+
+  const handleDownloadSampleCsv = () => {
+    const headers = 'subject,chapter,topic,difficulty,type,prompt,promptBangla,optA,optB,optC,optD,correctOpt,explanation';
+    const sampleRow1 = 'English Language & Literature,Grammar,Prepositions,EASY,SINGLE_MCQ,"He is proficient ___ English.","তিনি ইংরেজিতে দক্ষ।","in","at","with","on",A,"Proficient takes \'in\'."';
+    const sampleRow2 = 'Mathematics & Analytical Ability,Algebra,Equations,MEDIUM,SINGLE_MCQ,"If $x + 2 = 5$, what is $x$?","যদি $x + 2 = 5$ হয়, তবে $x$ এর মান কত?","1","2","3","4",C,"Subtracting 2 gives $x = 3$."';
+    const sampleRow3 = 'Bangladesh & Global Affairs,History,Liberation War,MEDIUM,SINGLE_MCQ,"In which year did the Bangladesh Liberation War take place?","বাংলাদেশের মুক্তিযুদ্ধ কোন সালে হয়েছিল?","1970","1971","1972","1973",B,"1971."';
+    const csvContent = 'data:text/csv;charset=utf-8,' + [headers, sampleRow1, sampleRow2, sampleRow3].join('\n');
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement('a');
+    link.setAttribute('href', encodedUri);
+    link.setAttribute('download', 'bank_exam_question_template.csv');
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   const fetchSubmissions = async (examId: string) => {
@@ -236,6 +560,7 @@ export const InstructorExamBuilder: React.FC = () => {
 
   useEffect(() => {
     fetchExams();
+    fetchCourses();
   }, []);
 
   useEffect(() => {
@@ -269,7 +594,8 @@ export const InstructorExamBuilder: React.FC = () => {
       negativeMarkingRate: 0.25,
       allowedAttempts: 1,
       startsAt: new Date().toISOString().slice(0, 16),
-      endsAt: new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString().slice(0, 16)
+      endsAt: new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString().slice(0, 16),
+      courseIds: []
     });
     setSelectedQuestionIds([]);
     setIsExamModalOpen(true);
@@ -291,7 +617,8 @@ export const InstructorExamBuilder: React.FC = () => {
       negativeMarkingRate: exam.negativeMarkingRate,
       allowedAttempts: exam.allowedAttempts,
       startsAt: exam.startsAt ? new Date(exam.startsAt).toISOString().slice(0, 16) : '',
-      endsAt: exam.endsAt ? new Date(exam.endsAt).toISOString().slice(0, 16) : ''
+      endsAt: exam.endsAt ? new Date(exam.endsAt).toISOString().slice(0, 16) : '',
+      courseIds: (exam as any).linkedCourseIds || []
     });
     setIsExamModalOpen(true);
   };
@@ -316,6 +643,14 @@ export const InstructorExamBuilder: React.FC = () => {
       }
     }
 
+    // Validation for Maximum Attempts per Student (positive whole integer)
+    const attempts = Number(examForm.allowedAttempts);
+    if (!Number.isInteger(attempts) || attempts < 1) {
+      setError('Maximum Attempts per Student must be a positive integer (at least 1).');
+      setActionLoading(false);
+      return;
+    }
+
     try {
       const token = localStorage.getItem('token');
       const payload: any = {
@@ -332,7 +667,8 @@ export const InstructorExamBuilder: React.FC = () => {
         negativeMarkingRate: Number(examForm.negativeMarkingRate),
         allowedAttempts: Number(examForm.allowedAttempts),
         startsAt: new Date(examForm.startsAt).toISOString(),
-        endsAt: new Date(examForm.endsAt).toISOString()
+        endsAt: new Date(examForm.endsAt).toISOString(),
+        courseIds: examForm.courseIds
       };
 
       if (!editingExamId) {
@@ -754,6 +1090,18 @@ export const InstructorExamBuilder: React.FC = () => {
                       {selectedExam.resultReleaseMode || 'INSTANT'}
                     </div>
                   </div>
+                  <div style={{ background: '#f8fafc', padding: '10px 12px', borderRadius: '6px', gridColumn: 'span 2' }}>
+                    <div style={{ fontSize: '0.72rem', color: '#64748b' }}>ASSOCIATED COURSES</div>
+                    <div style={{ fontSize: '0.85rem', fontWeight: 600, color: '#0f172a', marginTop: '2px' }}>
+                      {selectedExam.linkedCourses && selectedExam.linkedCourses.length > 0 ? (
+                        <span style={{ color: '#2563eb' }}>
+                          {selectedExam.linkedCourses.map((c: any) => c.title).join(', ')}
+                        </span>
+                      ) : (
+                        <span style={{ color: '#64748b', fontStyle: 'italic' }}>Standalone Global Mock Exam</span>
+                      )}
+                    </div>
+                  </div>
                 </div>
               </Card>
 
@@ -819,10 +1167,7 @@ export const InstructorExamBuilder: React.FC = () => {
                       <Button
                         variant="primary"
                         size="sm"
-                        onClick={() => {
-                          setSelectedQuestionIds(currentExamQuestions.map((q: any) => q.questionId));
-                          setIsQuestionModalOpen(true);
-                        }}
+                        onClick={handleOpenQuestionModal}
                       >
                         <ListPlus size={16} /> Manage Questions
                       </Button>
@@ -1160,7 +1505,7 @@ export const InstructorExamBuilder: React.FC = () => {
                 </div>
               </div>
 
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
                 <div>
                   <label style={{ display: 'block', fontSize: '0.85rem', color: '#334155', marginBottom: '4px' }}>
                     Total Marks *
@@ -1188,7 +1533,9 @@ export const InstructorExamBuilder: React.FC = () => {
                     style={{ width: '100%', padding: '8px 12px', borderRadius: '6px', background: '#ffffff', border: '1px solid #cbd5e1', color: '#0f172a' }}
                   />
                 </div>
+              </div>
 
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
                 <div>
                   <label style={{ display: 'block', fontSize: '0.85rem', color: '#334155', marginBottom: '4px' }}>
                     Negative Rate *
@@ -1199,6 +1546,24 @@ export const InstructorExamBuilder: React.FC = () => {
                     min="0"
                     value={examForm.negativeMarkingRate}
                     onChange={(e) => setExamForm({ ...examForm, negativeMarkingRate: Number(e.target.value) })}
+                    required
+                    style={{ width: '100%', padding: '8px 12px', borderRadius: '6px', background: '#ffffff', border: '1px solid #cbd5e1', color: '#0f172a' }}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.85rem', color: '#334155', marginBottom: '4px' }}>
+                    Maximum Attempts per Student *
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={examForm.allowedAttempts}
+                    onChange={(e) => {
+                      const val = e.target.value === '' ? '' : parseInt(e.target.value, 10);
+                      setExamForm({ ...examForm, allowedAttempts: val as any });
+                    }}
                     required
                     style={{ width: '100%', padding: '8px 12px', borderRadius: '6px', background: '#ffffff', border: '1px solid #cbd5e1', color: '#0f172a' }}
                   />
@@ -1291,6 +1656,43 @@ export const InstructorExamBuilder: React.FC = () => {
                 </select>
               </div>
 
+              {/* Course Association Selector (Option B) */}
+              <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '12px' }}>
+                <label style={{ display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#334155', marginBottom: '4px' }}>
+                  Link to Course(s) (Optional)
+                </label>
+                <span style={{ fontSize: '0.75rem', color: '#64748b', display: 'block', marginBottom: '8px' }}>
+                  Associate this exam with specific courses you teach. Leave unchecked to keep as an independent Global Mock Exam.
+                </span>
+                {availableCourses.length === 0 ? (
+                  <div style={{ fontSize: '0.8rem', color: '#94a3b8', fontStyle: 'italic' }}>
+                    No eligible courses found under your account. This exam will remain a standalone Global Mock Exam.
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', maxHeight: '130px', overflowY: 'auto' }}>
+                    {availableCourses.map((c: any) => {
+                      const isChecked = examForm.courseIds.includes(c.id);
+                      return (
+                        <label key={c.id} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.82rem', color: '#1e293b', cursor: 'pointer' }}>
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setExamForm({ ...examForm, courseIds: [...examForm.courseIds, c.id] });
+                              } else {
+                                setExamForm({ ...examForm, courseIds: examForm.courseIds.filter((id) => id !== c.id) });
+                              }
+                            }}
+                          />
+                          <span>{c.title}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '16px' }}>
                 <Button variant="secondary" onClick={() => setIsExamModalOpen(false)}>
                   Cancel
@@ -1304,523 +1706,711 @@ export const InstructorExamBuilder: React.FC = () => {
         </div>
       )}
 
-      {/* Modal: Question Bank Selector */}
+      {/* Modal: 3-Tab Question Hub (Bank, Manual, CSV) */}
       {isQuestionModalOpen && (
-        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(15, 23, 42, 0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, backdropFilter: 'blur(4px)' }}>
-          <Card style={{ width: '850px', maxWidth: '95%', maxHeight: '90vh', display: 'flex', flexDirection: 'column', padding: '24px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(15, 23, 42, 0.65)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, backdropFilter: 'blur(4px)' }}>
+          <Card style={{ width: '960px', maxWidth: '96%', maxHeight: '92vh', display: 'flex', flexDirection: 'column', padding: '24px', position: 'relative' }}>
+            {/* Modal Header */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '14px' }}>
               <div>
-                <h3 style={{ fontSize: '1.25rem', fontWeight: 700, margin: 0 }}>
-                  Manage Exam Questions
-                </h3>
-                <span style={{ fontSize: '0.8rem', color: '#64748b' }}>
-                  Select questions from the question bank to assign to <strong>{selectedExam?.title}</strong>.
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <h3 style={{ fontSize: '1.25rem', fontWeight: 800, margin: 0, color: '#0f172a' }}>
+                    Manage Exam Questions
+                  </h3>
+                  <Badge text="DRAFT EXAM" type="info" />
+                </div>
+                <span style={{ fontSize: '0.82rem', color: '#64748b', display: 'block', marginTop: '2px' }}>
+                  Assign questions to <strong>{selectedExam?.title}</strong> from the bank, manual authoring, or bulk CSV import.
                 </span>
               </div>
-              <button onClick={() => setIsQuestionModalOpen(false)} style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer' }}>
+              <button
+                onClick={handleCloseQuestionModal}
+                style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer', padding: '4px' }}
+                title="Close modal"
+              >
                 <X size={20} />
               </button>
             </div>
 
-            {/* Filter Bar */}
-            <div style={{ display: 'flex', gap: '10px', marginBottom: '16px', flexWrap: 'wrap' }}>
-              <div style={{ flex: '1 1 200px', position: 'relative' }}>
-                <input
-                  type="text"
-                  placeholder="Search questions by prompt or topic..."
-                  value={qSearch}
-                  onChange={(e) => setQSearch(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') fetchAvailableQuestions(); }}
-                  style={{ width: '100%', padding: '8px 12px', borderRadius: '6px', background: '#ffffff', border: '1px solid #cbd5e1', color: '#0f172a', fontSize: '0.85rem' }}
-                />
-              </div>
-
-              <select
-                value={qSubject}
-                onChange={(e) => setQSubject(e.target.value)}
-                style={{ padding: '8px 12px', borderRadius: '6px', background: '#ffffff', border: '1px solid #cbd5e1', color: '#0f172a', fontSize: '0.85rem' }}
+            {/* 3-Tab Navigation Bar */}
+            <div style={{ display: 'flex', gap: '8px', borderBottom: '1px solid #e2e8f0', paddingBottom: '10px', marginBottom: '14px' }}>
+              <button
+                type="button"
+                onClick={() => setQuestionHubTab('BANK')}
+                style={{
+                  padding: '8px 16px',
+                  borderRadius: '6px',
+                  border: 'none',
+                  background: questionHubTab === 'BANK' ? '#2563eb' : '#f1f5f9',
+                  color: questionHubTab === 'BANK' ? '#ffffff' : '#475569',
+                  fontWeight: 700,
+                  fontSize: '0.86rem',
+                  cursor: 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  transition: 'all 0.15s ease'
+                }}
               >
-                <option value="">All Subjects</option>
-                <option value="English Language & Literature">English</option>
-                <option value="Mathematics & Analytical Ability">Mathematics</option>
-                <option value="Bangla Language & Literature">Bangla</option>
-                <option value="Bangladesh & Global Affairs">General Knowledge</option>
-                <option value="Banking, Finance & Economy">Banking & Finance</option>
-              </select>
+                <Search size={15} /> Select from Question Bank
+              </button>
 
-              <select
-                value={qDifficulty}
-                onChange={(e) => setQDifficulty(e.target.value)}
-                style={{ padding: '8px 12px', borderRadius: '6px', background: '#ffffff', border: '1px solid #cbd5e1', color: '#0f172a', fontSize: '0.85rem' }}
+              <button
+                type="button"
+                onClick={() => setQuestionHubTab('MANUAL')}
+                style={{
+                  padding: '8px 16px',
+                  borderRadius: '6px',
+                  border: 'none',
+                  background: questionHubTab === 'MANUAL' ? '#2563eb' : '#f1f5f9',
+                  color: questionHubTab === 'MANUAL' ? '#ffffff' : '#475569',
+                  fontWeight: 700,
+                  fontSize: '0.86rem',
+                  cursor: 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  transition: 'all 0.15s ease'
+                }}
               >
-                <option value="">All Difficulties</option>
-                <option value="EASY">EASY</option>
-                <option value="MEDIUM">MEDIUM</option>
-                <option value="HARD">HARD</option>
-              </select>
+                <Plus size={15} /> Create Question Manually
+              </button>
 
-              <Button variant="secondary" size="sm" onClick={fetchAvailableQuestions}>
-                <Search size={14} /> Filter
-              </Button>
+              <button
+                type="button"
+                onClick={() => setQuestionHubTab('CSV')}
+                style={{
+                  padding: '8px 16px',
+                  borderRadius: '6px',
+                  border: 'none',
+                  background: questionHubTab === 'CSV' ? '#2563eb' : '#f1f5f9',
+                  color: questionHubTab === 'CSV' ? '#ffffff' : '#475569',
+                  fontWeight: 700,
+                  fontSize: '0.86rem',
+                  cursor: 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  transition: 'all 0.15s ease'
+                }}
+              >
+                <Upload size={15} /> Import Questions from CSV
+              </button>
             </div>
 
-            {/* Selection HUD */}
-            <div style={{ padding: '10px 14px', background: 'rgba(59, 130, 246, 0.1)', border: '1px solid rgba(59, 130, 246, 0.25)', borderRadius: '6px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-              <span style={{ fontSize: '0.88rem', color: '#93c5fd', fontWeight: 600 }}>
-                Selected Questions: {selectedQuestionIds.length}
-              </span>
+            {/* Selection HUD & Staged Questions Bar */}
+            <div
+              style={{
+                padding: '10px 14px',
+                background: '#eff6ff',
+                border: '1px solid #bfdbfe',
+                borderRadius: '8px',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: '14px',
+                flexWrap: 'wrap',
+                gap: '8px'
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                <span style={{ fontSize: '0.9rem', color: '#1e40af', fontWeight: 700 }}>
+                  Staged for this Exam: {selectedQuestionIds.length} Question{selectedQuestionIds.length === 1 ? '' : 's'}
+                </span>
+                {(() => {
+                  const unapprovedCount = availableQuestions.filter(
+                    (q) => selectedQuestionIds.includes(q.id) && !q.isApproved
+                  ).length;
+                  if (unapprovedCount > 0) {
+                    return (
+                      <span
+                        style={{
+                          fontSize: '0.75rem',
+                          background: '#fef3c7',
+                          color: '#92400e',
+                          border: '1px solid #fcd34d',
+                          padding: '2px 8px',
+                          borderRadius: '12px',
+                          fontWeight: 600,
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '4px'
+                        }}
+                      >
+                        <AlertTriangle size={12} /> {unapprovedCount} Pending Admin Review
+                      </span>
+                    );
+                  }
+                  if (selectedQuestionIds.length > 0) {
+                    return (
+                      <span
+                        style={{
+                          fontSize: '0.75rem',
+                          background: '#dcfce7',
+                          color: '#166534',
+                          border: '1px solid #86efac',
+                          padding: '2px 8px',
+                          borderRadius: '12px',
+                          fontWeight: 600,
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '4px'
+                        }}
+                      >
+                        <CheckCircle2 size={12} /> All Verified
+                      </span>
+                    );
+                  }
+                  return null;
+                })()}
+              </div>
+
               {selectedQuestionIds.length > 0 && (
                 <button
+                  type="button"
                   onClick={() => setSelectedQuestionIds([])}
-                  style={{ background: 'none', border: 'none', color: '#f87171', fontSize: '0.8rem', cursor: 'pointer', fontWeight: 600 }}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: '#dc2626',
+                    fontSize: '0.8rem',
+                    cursor: 'pointer',
+                    fontWeight: 600,
+                    textDecoration: 'underline'
+                  }}
                 >
-                  Clear Selection
+                  Clear All Staged
                 </button>
               )}
             </div>
 
-            {/* Questions List */}
-            <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '8px', paddingRight: '4px', minHeight: '320px', maxHeight: '420px' }}>
-              {availableQuestions.length === 0 ? (
-                <div style={{ textAlign: 'center', padding: '36px', color: '#64748b' }}>
-                  No matching questions found in question bank.
-                </div>
-              ) : (
-                availableQuestions.map((q) => {
-                  const isChecked = selectedQuestionIds.includes(q.id);
-                  return (
-                    <div
-                      key={q.id}
-                      onClick={() => toggleQuestionSelection(q.id)}
-                      style={{
-                        padding: '12px 14px',
-                        borderRadius: '6px',
-                        background: isChecked ? '#eff6ff' : '#ffffff',
-                        border: isChecked ? '1px solid #3b82f6' : '1px solid #e2e8f0',
-                        cursor: 'pointer',
-                        display: 'flex',
-                        alignItems: 'flex-start',
-                        gap: '12px'
+            {/* TAB 1: BROWSE QUESTION BANK */}
+            {questionHubTab === 'BANK' && (
+              <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, overflow: 'hidden' }}>
+                {/* Filter Controls */}
+                <div style={{ display: 'flex', gap: '8px', marginBottom: '12px', flexWrap: 'wrap' }}>
+                  <div style={{ flex: '1 1 200px', position: 'relative' }}>
+                    <input
+                      type="text"
+                      placeholder="Search question bank by prompt, topic, formula..."
+                      value={qSearch}
+                      onChange={(e) => setQSearch(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') fetchAvailableQuestions();
                       }}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={isChecked}
-                        onChange={() => {}}
-                        style={{ marginTop: '3px', cursor: 'pointer' }}
-                      />
-                      <div style={{ flex: 1 }}>
-                        <div style={{ fontSize: '0.9rem', color: '#0f172a', fontWeight: 500 }}>
-                          {q.prompt}
+                      style={{
+                        width: '100%',
+                        padding: '8px 12px',
+                        borderRadius: '6px',
+                        background: '#ffffff',
+                        border: '1px solid #cbd5e1',
+                        color: '#0f172a',
+                        fontSize: '0.85rem'
+                      }}
+                    />
+                  </div>
+
+                  <select
+                    value={qSubject}
+                    onChange={(e) => setQSubject(e.target.value)}
+                    style={{
+                      padding: '8px 12px',
+                      borderRadius: '6px',
+                      background: '#ffffff',
+                      border: '1px solid #cbd5e1',
+                      color: '#0f172a',
+                      fontSize: '0.85rem'
+                    }}
+                  >
+                    <option value="">All Subjects</option>
+                    <option value="English Language & Literature">English</option>
+                    <option value="Mathematics & Analytical Ability">Mathematics</option>
+                    <option value="Bangla Language & Literature">Bangla</option>
+                    <option value="Bangladesh & Global Affairs">General Knowledge</option>
+                    <option value="Banking, Finance & Economy">Banking & Finance</option>
+                  </select>
+
+                  <select
+                    value={qDifficulty}
+                    onChange={(e) => setQDifficulty(e.target.value)}
+                    style={{
+                      padding: '8px 12px',
+                      borderRadius: '6px',
+                      background: '#ffffff',
+                      border: '1px solid #cbd5e1',
+                      color: '#0f172a',
+                      fontSize: '0.85rem'
+                    }}
+                  >
+                    <option value="">All Difficulties</option>
+                    <option value="EASY">EASY</option>
+                    <option value="MEDIUM">MEDIUM</option>
+                    <option value="HARD">HARD</option>
+                  </select>
+
+                  <Button variant="secondary" size="sm" onClick={fetchAvailableQuestions}>
+                    <Search size={14} /> Search
+                  </Button>
+                </div>
+
+                {/* Questions List */}
+                <div
+                  style={{
+                    flex: 1,
+                    overflowY: 'auto',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '8px',
+                    paddingRight: '6px',
+                    minHeight: '280px',
+                    maxHeight: '380px'
+                  }}
+                >
+                  {availableQuestions.length === 0 ? (
+                    <div style={{ textAlign: 'center', padding: '36px', color: '#64748b' }}>
+                      No questions found matching criteria.
+                    </div>
+                  ) : (
+                    availableQuestions.map((q) => {
+                      const isChecked = selectedQuestionIds.includes(q.id);
+                      return (
+                        <div
+                          key={q.id}
+                          onClick={() => toggleQuestionSelection(q.id)}
+                          style={{
+                            padding: '12px 14px',
+                            borderRadius: '6px',
+                            background: isChecked ? '#eff6ff' : '#ffffff',
+                            border: isChecked ? '1.5px solid #3b82f6' : '1px solid #e2e8f0',
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'flex-start',
+                            gap: '12px',
+                            transition: 'background 0.15s ease'
+                          }}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => {}}
+                            style={{ marginTop: '3px', cursor: 'pointer' }}
+                          />
+                          <div style={{ flex: 1 }}>
+                            <div style={{ fontSize: '0.9rem', color: '#0f172a', fontWeight: 600 }}>
+                              <MathRenderer text={q.prompt} />
+                            </div>
+                            {q.prompt_bangla && (
+                              <div style={{ fontSize: '0.82rem', color: '#64748b', marginTop: '2px' }}>
+                                <MathRenderer text={q.prompt_bangla} />
+                              </div>
+                            )}
+                            <div style={{ display: 'flex', gap: '8px', marginTop: '6px', fontSize: '0.74rem', color: '#64748b', alignItems: 'center' }}>
+                              <span>Subject: {q.subject}</span>
+                              <span>•</span>
+                              <span>Topic: {q.topic}</span>
+                              <span>•</span>
+                              <span style={{ color: q.difficulty === 'HARD' ? '#b91c1c' : q.difficulty === 'MEDIUM' ? '#b45309' : '#15803d', fontWeight: 700 }}>
+                                {q.difficulty}
+                              </span>
+                              <span>•</span>
+                              <span
+                                style={{
+                                  color: q.isApproved ? '#15803d' : '#b45309',
+                                  background: q.isApproved ? '#dcfce7' : '#fef3c7',
+                                  padding: '1px 6px',
+                                  borderRadius: '4px',
+                                  fontWeight: 700
+                                }}
+                              >
+                                {q.isApproved ? 'APPROVED' : 'PENDING APPROVAL'}
+                              </span>
+                            </div>
+                          </div>
                         </div>
-                        {q.prompt_bangla && (
-                          <div style={{ fontSize: '0.82rem', color: '#64748b', marginTop: '2px' }}>
-                            {q.prompt_bangla}
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* TAB 2: CREATE QUESTION MANUALLY */}
+            {questionHubTab === 'MANUAL' && (
+              <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', paddingRight: '6px' }}>
+                {manualSuccess && (
+                  <div style={{ padding: '10px 14px', borderRadius: '6px', background: '#dcfce7', border: '1px solid #86efac', color: '#166534', fontSize: '0.85rem', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <CheckCircle2 size={16} /> {manualSuccess}
+                  </div>
+                )}
+                {manualError && (
+                  <div style={{ padding: '10px 14px', borderRadius: '6px', background: '#fee2e2', border: '1px solid #fca5a5', color: '#991b1b', fontSize: '0.85rem', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <AlertCircle size={16} /> {manualError}
+                  </div>
+                )}
+
+                <form onSubmit={handleCreateManualQuestion} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '10px' }}>
+                    <div>
+                      <label style={{ display: 'block', fontSize: '0.78rem', fontWeight: 600, color: '#475569', marginBottom: '3px' }}>Subject *</label>
+                      <select
+                        value={manualSubject}
+                        onChange={(e) => setManualSubject(e.target.value)}
+                        style={{ width: '100%', padding: '7px 10px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '0.85rem' }}
+                      >
+                        <option value="English Language & Literature">English Language & Literature</option>
+                        <option value="Mathematics & Analytical Ability">Mathematics & Analytical Ability</option>
+                        <option value="Bangla Language & Literature">Bangla Language & Literature</option>
+                        <option value="Bangladesh & Global Affairs">Bangladesh & Global Affairs</option>
+                        <option value="Banking, Finance & Economy">Banking, Finance & Economy</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label style={{ display: 'block', fontSize: '0.78rem', fontWeight: 600, color: '#475569', marginBottom: '3px' }}>Chapter *</label>
+                      <input
+                        type="text"
+                        value={manualChapter}
+                        onChange={(e) => setManualChapter(e.target.value)}
+                        required
+                        placeholder="e.g. Grammar, Algebra"
+                        style={{ width: '100%', padding: '7px 10px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '0.85rem' }}
+                      />
+                    </div>
+
+                    <div>
+                      <label style={{ display: 'block', fontSize: '0.78rem', fontWeight: 600, color: '#475569', marginBottom: '3px' }}>Topic *</label>
+                      <input
+                        type="text"
+                        value={manualTopic}
+                        onChange={(e) => setManualTopic(e.target.value)}
+                        required
+                        placeholder="e.g. Prepositions, Profit & Loss"
+                        style={{ width: '100%', padding: '7px 10px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '0.85rem' }}
+                      />
+                    </div>
+
+                    <div>
+                      <label style={{ display: 'block', fontSize: '0.78rem', fontWeight: 600, color: '#475569', marginBottom: '3px' }}>Difficulty *</label>
+                      <select
+                        value={manualDifficulty}
+                        onChange={(e) => setManualDifficulty(e.target.value as any)}
+                        style={{ width: '100%', padding: '7px 10px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '0.85rem' }}
+                      >
+                        <option value="EASY">EASY</option>
+                        <option value="MEDIUM">MEDIUM</option>
+                        <option value="HARD">HARD</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label style={{ display: 'block', fontSize: '0.78rem', fontWeight: 600, color: '#475569', marginBottom: '3px' }}>Question Type *</label>
+                      <select
+                        value={manualType}
+                        onChange={(e) => setManualType(e.target.value as any)}
+                        style={{ width: '100%', padding: '7px 10px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '0.85rem' }}
+                      >
+                        <option value="SINGLE_MCQ">Single MCQ (1 Correct Answer)</option>
+                        <option value="MULTI_SELECT">Multi-Select (1+ Correct Answers)</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Question Prompts */}
+                  <div>
+                    <label style={{ display: 'block', fontSize: '0.78rem', fontWeight: 600, color: '#475569', marginBottom: '3px' }}>
+                      Prompt (English) * <span style={{ fontSize: '0.72rem', color: '#64748b' }}>Supports LaTeX equations enclosed in $...$</span>
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={manualPrompt}
+                      onChange={(e) => setManualPrompt(e.target.value)}
+                      required
+                      placeholder="e.g. Find the value of $x$ when $2x + 6 = 14$."
+                      style={{ width: '100%', padding: '8px 10px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '0.85rem' }}
+                    />
+                  </div>
+
+                  <div>
+                    <label style={{ display: 'block', fontSize: '0.78rem', fontWeight: 600, color: '#475569', marginBottom: '3px' }}>
+                      Prompt (Bangla Optional)
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={manualPromptBangla}
+                      onChange={(e) => setManualPromptBangla(e.target.value)}
+                      placeholder="বাংলা প্রশ্ন লিখুন (যেমন: $2x + 6 = 14$ হলে $x$ এর মান কত?)"
+                      style={{ width: '100%', padding: '8px 10px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '0.85rem' }}
+                    />
+                  </div>
+
+                  {/* Options (A, B, C, D) */}
+                  <div style={{ background: '#f8fafc', padding: '12px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+                    <div style={{ fontSize: '0.82rem', fontWeight: 700, color: '#0f172a', marginBottom: '8px', display: 'flex', justifyContent: 'space-between' }}>
+                      <span>Answer Options (Select correct answer)</span>
+                      <span style={{ fontSize: '0.75rem', color: '#64748b' }}>Designate the correct choice via the selector</span>
+                    </div>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                      {manualOptions.map((opt, idx) => (
+                        <div key={opt.optionKey} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <input
+                            type={manualType === 'SINGLE_MCQ' ? 'radio' : 'checkbox'}
+                            name="manualCorrect"
+                            checked={opt.isCorrect}
+                            onChange={() => handleManualOptionChange(idx, 'isCorrect', true)}
+                            style={{ cursor: 'pointer', width: '16px', height: '16px' }}
+                          />
+                          <span style={{ width: '24px', fontWeight: 700, fontSize: '0.85rem', color: opt.isCorrect ? '#166534' : '#475569' }}>
+                            {opt.optionKey}.
+                          </span>
+                          <input
+                            type="text"
+                            required
+                            placeholder={`Option ${opt.optionKey} text`}
+                            value={opt.text}
+                            onChange={(e) => handleManualOptionChange(idx, 'text', e.target.value)}
+                            style={{
+                              flex: 1,
+                              padding: '6px 10px',
+                              borderRadius: '6px',
+                              border: opt.isCorrect ? '1.5px solid #16a34a' : '1px solid #cbd5e1',
+                              background: opt.isCorrect ? '#f0fdf4' : '#ffffff',
+                              fontSize: '0.85rem'
+                            }}
+                          />
+                          <input
+                            type="text"
+                            placeholder="Bangla text (optional)"
+                            value={opt.textBangla}
+                            onChange={(e) => handleManualOptionChange(idx, 'textBangla', e.target.value)}
+                            style={{ flex: '0 1 180px', padding: '6px 10px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '0.85rem' }}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Explanation */}
+                  <div>
+                    <label style={{ display: 'block', fontSize: '0.78rem', fontWeight: 600, color: '#475569', marginBottom: '3px' }}>
+                      Solution / Explanation (Optional)
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={manualExplanation}
+                      onChange={(e) => setManualExplanation(e.target.value)}
+                      placeholder="Step-by-step mathematical reasoning or grammatical rule explanation..."
+                      style={{ width: '100%', padding: '8px 10px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '0.85rem' }}
+                    />
+                  </div>
+
+                  {/* Platform Quality Governance Notice */}
+                  <div style={{ background: '#fef3c7', border: '1px solid #fcd34d', borderRadius: '6px', padding: '10px 12px', fontSize: '0.76rem', color: '#92400e', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <ShieldAlert size={16} />
+                    <span>
+                      <strong>Platform Governance Notice:</strong> Newly authored faculty questions are saved with status <strong>PENDING ADMIN APPROVAL</strong>. You can test them immediately in this DRAFT exam, but approval is required to publish to LIVE.
+                    </span>
+                  </div>
+
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '6px' }}>
+                    <Button variant="primary" type="submit" disabled={manualLoading}>
+                      <Plus size={15} /> {manualLoading ? 'Saving Question...' : 'Save & Stage for This Exam'}
+                    </Button>
+                  </div>
+                </form>
+              </div>
+            )}
+
+            {/* TAB 3: IMPORT QUESTIONS FROM CSV */}
+            {questionHubTab === 'CSV' && (
+              <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', paddingRight: '6px' }}>
+                {csvImportSuccess && (
+                  <div style={{ padding: '10px 14px', borderRadius: '6px', background: '#dcfce7', border: '1px solid #86efac', color: '#166534', fontSize: '0.85rem', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <CheckCircle2 size={16} /> {csvImportSuccess}
+                  </div>
+                )}
+                {csvImportError && (
+                  <div style={{ padding: '10px 14px', borderRadius: '6px', background: '#fee2e2', border: '1px solid #fca5a5', color: '#991b1b', fontSize: '0.85rem', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <AlertCircle size={16} /> {csvImportError}
+                  </div>
+                )}
+
+                {/* File Upload Zone & Template Download */}
+                <div style={{ display: 'flex', gap: '12px', marginBottom: '14px', flexWrap: 'wrap' }}>
+                  <div
+                    style={{
+                      flex: 1,
+                      minWidth: '280px',
+                      border: '2px dashed #cbd5e1',
+                      borderRadius: '8px',
+                      padding: '16px',
+                      textAlign: 'center',
+                      background: '#f8fafc',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    <Upload size={24} style={{ color: '#2563eb', margin: '0 auto 6px auto' }} />
+                    <div style={{ fontSize: '0.85rem', fontWeight: 600, color: '#0f172a' }}>
+                      {csvFile ? csvFile.name : 'Choose a .CSV question dataset'}
+                    </div>
+                    <span style={{ fontSize: '0.74rem', color: '#64748b' }}>
+                      {csvFile ? `${(csvFile.size / 1024).toFixed(1)} KB` : 'Click to browse or drop file here'}
+                    </span>
+                    <input
+                      type="file"
+                      accept=".csv"
+                      onChange={handleCsvFileChange}
+                      style={{ display: 'block', margin: '8px auto 0 auto', fontSize: '0.8rem' }}
+                    />
+                  </div>
+
+                  <div style={{ flex: '0 1 300px', display: 'flex', flexDirection: 'column', gap: '8px', justifyContent: 'center' }}>
+                    <Button variant="secondary" size="sm" onClick={handleDownloadSampleCsv}>
+                      <Download size={14} /> Download Sample CSV Template
+                    </Button>
+                    <span style={{ fontSize: '0.74rem', color: '#64748b' }}>
+                      Header columns: subject, chapter, topic, difficulty, type, prompt, promptBangla, optA, optB, optC, optD, correctOpt, explanation
+                    </span>
+                  </div>
+                </div>
+
+                {/* Pre-Validation Summary */}
+                {csvRawText && (
+                  <div style={{ marginBottom: '14px' }}>
+                    <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginBottom: '8px' }}>
+                      <span style={{ fontSize: '0.85rem', fontWeight: 700, color: '#0f172a' }}>Pre-Validation Summary:</span>
+                      <span style={{ fontSize: '0.8rem', background: '#dcfce7', color: '#166534', padding: '2px 8px', borderRadius: '4px', fontWeight: 600 }}>
+                        {csvValidCount} Valid Questions Ready
+                      </span>
+                      {csvRowErrors.length > 0 && (
+                        <span style={{ fontSize: '0.8rem', background: '#fee2e2', color: '#991b1b', padding: '2px 8px', borderRadius: '4px', fontWeight: 600 }}>
+                          {csvRowErrors.length} Issue(s) Flagged
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Error breakdown if any */}
+                    {csvRowErrors.length > 0 && (
+                      <div style={{ maxHeight: '120px', overflowY: 'auto', background: '#fff1f2', border: '1px solid #fecdd3', borderRadius: '6px', padding: '8px 12px', marginBottom: '10px' }}>
+                        <div style={{ fontSize: '0.76rem', fontWeight: 700, color: '#9f1239', marginBottom: '4px' }}>Flagged Rows (will be skipped):</div>
+                        {csvRowErrors.map((err, i) => (
+                          <div key={i} style={{ fontSize: '0.74rem', color: '#be123c' }}>
+                            • Row {err.row}: {err.error}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Preview of Parsed Valid Rows */}
+                    {csvParsedRows.length > 0 && (
+                      <div style={{ maxHeight: '180px', overflowY: 'auto', border: '1px solid #e2e8f0', borderRadius: '6px', background: '#ffffff' }}>
+                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.76rem' }}>
+                          <thead>
+                            <tr style={{ background: '#f8fafc', borderBottom: '1px solid #e2e8f0', textAlign: 'left' }}>
+                              <th style={{ padding: '6px 10px' }}>Row</th>
+                              <th style={{ padding: '6px 10px' }}>Subject</th>
+                              <th style={{ padding: '6px 10px' }}>Prompt</th>
+                              <th style={{ padding: '6px 10px' }}>Correct Key</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {csvParsedRows.slice(0, 10).map((r, i) => (
+                              <tr key={i} style={{ borderBottom: '1px solid #f1f5f9' }}>
+                                <td style={{ padding: '6px 10px', color: '#64748b' }}>{r.rowNumber}</td>
+                                <td style={{ padding: '6px 10px', fontWeight: 600 }}>{r.subject}</td>
+                                <td style={{ padding: '6px 10px' }}>{r.prompt}</td>
+                                <td style={{ padding: '6px 10px', fontWeight: 700, color: '#16a34a' }}>{r.correctOpt}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                        {csvParsedRows.length > 10 && (
+                          <div style={{ padding: '6px 10px', fontSize: '0.74rem', color: '#64748b', background: '#f8fafc', textAlign: 'center' }}>
+                            Showing first 10 of {csvParsedRows.length} valid questions...
                           </div>
                         )}
-                        <div style={{ display: 'flex', gap: '8px', marginTop: '6px', fontSize: '0.75rem', color: '#64748b' }}>
-                          <span>Subject: {q.subject}</span>
-                          <span>•</span>
-                          <span>Topic: {q.topic}</span>
-                          <span>•</span>
-                          <span style={{ color: q.difficulty === 'HARD' ? '#b91c1c' : q.difficulty === 'MEDIUM' ? '#b45309' : '#15803d', fontWeight: 700 }}>
-                            {q.difficulty}
-                          </span>
-                          <span>•</span>
-                          <span style={{ color: q.isApproved ? '#15803d' : '#b91c1c', fontWeight: 700 }}>
-                            {q.isApproved ? 'APPROVED' : 'UNAPPROVED'}
-                          </span>
-                        </div>
                       </div>
+                    )}
+
+                    {/* Action Button */}
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '12px' }}>
+                      <Button
+                        variant="primary"
+                        onClick={handleImportCsvQuestions}
+                        disabled={csvImportLoading || csvValidCount === 0}
+                      >
+                        <Upload size={14} /> {csvImportLoading ? 'Importing CSV...' : `Import ${csvValidCount} Valid Questions & Stage for Exam`}
+                      </Button>
                     </div>
-                  );
-                })
-              )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Modal Actions Footer */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '14px', paddingTop: '12px', borderTop: '1px solid #e2e8f0' }}>
+              <span style={{ fontSize: '0.76rem', color: '#64748b' }}>
+                Staged questions will be assigned to this exam upon clicking Save.
+              </span>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <Button variant="secondary" onClick={handleCloseQuestionModal}>
+                  Cancel
+                </Button>
+                <Button variant="primary" onClick={handleSaveAssignedQuestions} disabled={actionLoading}>
+                  {actionLoading ? 'Saving...' : `Save ${selectedQuestionIds.length} Assigned Questions`}
+                </Button>
+              </div>
             </div>
 
-            {/* Modal Actions */}
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '16px', paddingTop: '12px', borderTop: '1px solid #e2e8f0' }}>
-              <Button variant="secondary" onClick={() => setIsQuestionModalOpen(false)}>
-                Cancel
-              </Button>
-              <Button variant="primary" onClick={handleSaveAssignedQuestions} disabled={actionLoading}>
-                {actionLoading ? 'Saving...' : `Save ${selectedQuestionIds.length} Assigned Questions`}
-              </Button>
-            </div>
+            {/* Unsaved Changes Confirmation Dialog Overlay */}
+            {showUnsavedConfirm && (
+              <div
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  background: 'rgba(15, 23, 42, 0.75)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  borderRadius: '12px',
+                  zIndex: 20
+                }}
+              >
+                <div style={{ background: '#ffffff', borderRadius: '10px', padding: '24px', maxWidth: '440px', boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.2)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '12px', color: '#b45309' }}>
+                    <AlertTriangle size={24} />
+                    <h4 style={{ margin: 0, fontSize: '1.1rem', fontWeight: 700, color: '#0f172a' }}>Unsaved Staged Questions</h4>
+                  </div>
+                  <p style={{ fontSize: '0.85rem', color: '#475569', lineHeight: 1.5, marginBottom: '16px' }}>
+                    You have staged questions that are not yet saved to this exam. Questions created or imported remain stored in your Question Bank, but will not be assigned to this exam unless you save.
+                  </p>
+                  <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+                    <Button variant="secondary" size="sm" onClick={() => setShowUnsavedConfirm(false)}>
+                      Keep Editing
+                    </Button>
+                    <Button variant="danger" size="sm" onClick={handleConfirmDiscardAssignments}>
+                      Discard Assignments
+                    </Button>
+                    <Button variant="primary" size="sm" onClick={handleSaveAssignedQuestions} disabled={actionLoading}>
+                      Save & Close
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
           </Card>
         </div>
       )}
 
-      {/* STUDENT-VIEW EXAM PREVIEW MODAL (Safe Read-Only Simulation) */}
-      {isPreviewOpen && selectedExam && currentExamQuestions.length > 0 && (
-        <div className="integrity-overlay" style={{ zIndex: 9999, overflow: 'hidden' }}>
-          <div
-            style={{
-              display: 'flex',
-              flexDirection: 'column',
-              width: '100vw',
-              height: '100vh',
-              background: '#f8fafc',
-              color: '#0f172a'
-            }}
-          >
-            {/* Top Preview Bar */}
-            <header
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                padding: '0.75rem 2rem',
-                borderBottom: '1px solid #e2e8f0',
-                background: '#ffffff'
-              }}
-            >
-              <div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <span
-                    style={{
-                      background: '#fef08a',
-                      color: '#854d0e',
-                      border: '1px solid #fde047',
-                      padding: '2px 8px',
-                      borderRadius: '4px',
-                      fontSize: '0.72rem',
-                      fontWeight: 800
-                    }}
-                  >
-                    PREVIEW MODE (NO ATTEMPT CREATED)
-                  </span>
-                  <h1 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#1d4ed8', margin: 0 }}>
-                    {selectedExam.title}
-                  </h1>
-                </div>
-                <span style={{ fontSize: '0.8rem', color: '#64748b' }}>
-                  Duration: {selectedExam.durationMinutes}m | Total Marks: {selectedExam.totalMarks} | Pass Marks: {selectedExam.passMarks} | Negative Marking: -{selectedExam.negativeMarkingRate}
-                </span>
-              </div>
-
-              {/* Simulated Timer and Close Preview Button */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: '1.5rem' }}>
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '0.5rem',
-                    background: '#f1f5f9',
-                    padding: '0.5rem 1.25rem',
-                    borderRadius: '0.75rem',
-                    border: '1px solid #cbd5e1'
-                  }}
-                >
-                  <Timer style={{ width: '1.25rem', height: '1.25rem', color: '#2563eb' }} />
-                  <span style={{ fontSize: '1.15rem', fontWeight: 700, fontFamily: 'monospace', color: '#0f172a' }}>
-                    {selectedExam.durationMinutes}:00 (Simulated)
-                  </span>
-                </div>
-
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '0.4rem',
-                    color: '#15803d',
-                    fontSize: '0.85rem',
-                    fontWeight: 600
-                  }}
-                >
-                  <ShieldAlert style={{ width: '1rem', height: '1rem' }} />
-                  <span>Proctoring: {selectedExam.integrityEnabled ? `Active (Max ${selectedExam.maxViolationsAllowed} Strikes)` : 'Disabled'}</span>
-                </div>
-
-                <Button variant="secondary" size="sm" onClick={() => setIsPreviewOpen(false)}>
-                  <X size={16} /> Exit Preview
-                </Button>
-              </div>
-            </header>
-
-            {/* Main Delivery Simulation Area */}
-            <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-              {/* Left Column: Question Content */}
-              <main style={{ flex: 1, padding: '2.5rem', overflowY: 'auto' }}>
-                {(() => {
-                  const currentQ = currentExamQuestions[previewIndex];
-                  const qId = currentQ?.questionId || currentQ?.id;
-                  const currentStoredAnswer = previewAnswers[qId] || [];
-                  const isMarked = Boolean(previewMarked[qId]);
-
-                  const togglePreviewOption = (optId: string) => {
-                    setPreviewAnswers((prev) => {
-                      const existing = prev[qId] || [];
-                      if (currentQ.type === 'MULTI_SELECT') {
-                        return existing.includes(optId)
-                          ? { ...prev, [qId]: existing.filter((id) => id !== optId) }
-                          : { ...prev, [qId]: [...existing, optId] };
-                      }
-                      return { ...prev, [qId]: [optId] };
-                    });
-                  };
-
-                  const toggleMark = () => {
-                    setPreviewMarked((prev) => ({ ...prev, [qId]: !prev[qId] }));
-                  };
-
-                  return (
-                    <div style={{ maxWidth: '800px', margin: '0 auto', background: '#ffffff', padding: '2rem', borderRadius: '1rem', border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
-                        <span
-                          style={{
-                            fontSize: '0.85rem',
-                            color: '#1d4ed8',
-                            background: '#eff6ff',
-                            border: '1px solid #bfdbfe',
-                            padding: '0.25rem 0.75rem',
-                            borderRadius: '1rem',
-                            fontWeight: 600
-                          }}
-                        >
-                          Section: {currentQ?.sectionName || 'General'} | Marks: +{currentQ?.marks ?? 1} / -{currentQ?.negativeMarks ?? selectedExam.negativeMarkingRate}
-                        </span>
-
-                        <button
-                          type="button"
-                          onClick={toggleMark}
-                          style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '0.4rem',
-                            background: isMarked ? '#fef3c7' : '#ffffff',
-                            color: isMarked ? '#b45309' : '#475569',
-                            border: `1px solid ${isMarked ? '#fcd34d' : '#cbd5e1'}`,
-                            padding: '0.4rem 0.8rem',
-                            borderRadius: '0.5rem',
-                            cursor: 'pointer',
-                            fontWeight: 600
-                          }}
-                        >
-                          <Bookmark style={{ width: '0.9rem', height: '0.9rem' }} />
-                          {isMarked ? 'Marked for Review' : 'Mark for Review'}
-                        </button>
-                      </div>
-
-                      {/* Prompt with Bilingual and KaTeX support */}
-                      <div style={{ marginBottom: '2rem' }}>
-                        <h2 style={{ fontSize: '1.25rem', fontWeight: 700, lineHeight: 1.6, marginBottom: '0.75rem', color: '#0f172a' }}>
-                          {previewIndex + 1}. <MathRenderer text={currentQ?.prompt || ''} />
-                        </h2>
-                        {currentQ?.promptBangla && (
-                          <p style={{ color: '#475569', fontSize: '1.05rem', lineHeight: 1.6 }}>
-                            <MathRenderer text={currentQ.promptBangla} />
-                          </p>
-                        )}
-                      </div>
-
-                      {/* Options List */}
-                      {currentQ?.options && currentQ.options.length > 0 ? (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginBottom: '2.5rem' }}>
-                          {currentQ.options.map((opt: any) => {
-                            const isSelected = currentStoredAnswer.includes(opt.id);
-                            const isMulti = currentQ.type === 'MULTI_SELECT';
-
-                            return (
-                              <div
-                                key={opt.id}
-                                onClick={() => togglePreviewOption(opt.id)}
-                                style={{
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  gap: '1rem',
-                                  padding: '1rem 1.25rem',
-                                  background: isSelected ? '#eff6ff' : '#ffffff',
-                                  border: `1.5px solid ${isSelected ? '#2563eb' : '#cbd5e1'}`,
-                                  borderRadius: '0.75rem',
-                                  cursor: 'pointer',
-                                  transition: 'all 0.15s ease',
-                                  boxShadow: isSelected ? '0 1px 3px rgba(37,99,235,0.1)' : 'none'
-                                }}
-                              >
-                                <div
-                                  style={{
-                                    width: '1.25rem',
-                                    height: '1.25rem',
-                                    borderRadius: isMulti ? '4px' : '50%',
-                                    border: `2px solid ${isSelected ? '#2563eb' : '#94a3b8'}`,
-                                    background: isSelected ? '#2563eb' : '#ffffff',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    justifyContent: 'center',
-                                    color: '#ffffff',
-                                    fontSize: '0.75rem',
-                                    fontWeight: 700
-                                  }}
-                                >
-                                  {isSelected && (isMulti ? '✓' : '•')}
-                                </div>
-
-                                <span
-                                  style={{
-                                    width: '2rem',
-                                    height: '2rem',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    justifyContent: 'center',
-                                    borderRadius: '50%',
-                                    background: isSelected ? '#2563eb' : '#f1f5f9',
-                                    fontWeight: 700,
-                                    fontSize: '0.85rem',
-                                    color: isSelected ? '#ffffff' : '#334155',
-                                    border: `1px solid ${isSelected ? '#2563eb' : '#e2e8f0'}`
-                                  }}
-                                >
-                                  {opt.optionKey}
-                                </span>
-
-                                <div style={{ flex: 1, fontSize: '1rem', color: isSelected ? '#0f172a' : '#334155' }}>
-                                  <MathRenderer text={opt.text} />
-                                  {opt.textBangla && (
-                                    <span style={{ color: '#64748b', display: 'block', fontSize: '0.9rem', marginTop: '0.2rem' }}>
-                                      {opt.textBangla}
-                                    </span>
-                                  )}
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      ) : (
-                        <div style={{ background: '#f8fafc', padding: '1.5rem', borderRadius: '0.75rem', marginBottom: '2.5rem', border: '1px solid #e2e8f0' }}>
-                          <span style={{ color: '#475569', fontWeight: 600 }}>Type: {currentQ?.type || 'NON_MCQ'} (Direct Student Input)</span>
-                        </div>
-                      )}
-
-                      {/* Navigation Controls */}
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <Button
-                          variant="secondary"
-                          size="md"
-                          onClick={() => setPreviewIndex((prev) => Math.max(0, prev - 1))}
-                          disabled={previewIndex === 0}
-                        >
-                          <ChevronLeft size={16} /> Previous Question
-                        </Button>
-
-                        <span style={{ color: '#475569', fontSize: '0.9rem', fontWeight: 600 }}>
-                          Question {previewIndex + 1} of {currentExamQuestions.length}
-                        </span>
-
-                        <Button
-                          variant="secondary"
-                          size="md"
-                          onClick={() => setPreviewIndex((prev) => Math.min(currentExamQuestions.length - 1, prev + 1))}
-                          disabled={previewIndex === currentExamQuestions.length - 1}
-                        >
-                          Next Question <ChevronRight size={16} />
-                        </Button>
-                      </div>
-                    </div>
-                  );
-                })()}
-              </main>
-
-              {/* Right Column: Question Palette Sidebar */}
-              <aside
-                style={{
-                  width: '320px',
-                  background: '#ffffff',
-                  borderLeft: '1px solid #e2e8f0',
-                  padding: '1.5rem',
-                  overflowY: 'auto'
-                }}
-              >
-                <h3 style={{ fontSize: '0.95rem', fontWeight: 700, marginBottom: '1rem', color: '#0f172a' }}>
-                  Question Palette
-                </h3>
-
-                {/* Status Legend */}
-                <div
-                  style={{
-                    display: 'grid',
-                    gridTemplateColumns: '1fr 1fr',
-                    gap: '0.5rem',
-                    fontSize: '0.75rem',
-                    marginBottom: '1.5rem',
-                    color: '#475569',
-                    fontWeight: 500
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                    <div style={{ width: '10px', height: '10px', background: '#059669', borderRadius: '2px' }} /> Answered
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                    <div style={{ width: '10px', height: '10px', background: '#f1f5f9', border: '1px solid #cbd5e1', borderRadius: '2px' }} /> Unanswered
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                    <div style={{ width: '10px', height: '10px', background: '#ca8a04', borderRadius: '2px' }} /> Review
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                    <div style={{ width: '10px', height: '10px', border: '2px solid #2563eb', background: '#eff6ff', borderRadius: '2px' }} /> Current
-                  </div>
-                </div>
-
-                {/* Palette Grid */}
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '0.6rem' }}>
-                  {currentExamQuestions.map((q, idx) => {
-                    const qId = q.questionId || q.id;
-                    const ans = previewAnswers[qId];
-                    const isAnswered = ans && ans.length > 0;
-                    const isMarked = Boolean(previewMarked[qId]);
-                    const isCurrent = idx === previewIndex;
-
-                    let bgColor = '#ffffff';
-                    let textColor = '#334155';
-                    let borderColor = '#cbd5e1';
-
-                    if (isAnswered) {
-                      bgColor = '#059669';
-                      textColor = '#ffffff';
-                      borderColor = '#047857';
-                    } else if (isMarked) {
-                      bgColor = '#ca8a04';
-                      textColor = '#ffffff';
-                      borderColor = '#a16207';
-                    }
-
-                    if (isCurrent) {
-                      borderColor = '#2563eb';
-                      if (!isAnswered && !isMarked) {
-                        bgColor = '#eff6ff';
-                        textColor = '#1d4ed8';
-                      }
-                    }
-
-                    return (
-                      <button
-                        key={qId}
-                        type="button"
-                        onClick={() => setPreviewIndex(idx)}
-                        style={{
-                          height: '2.5rem',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          background: bgColor,
-                          color: textColor,
-                          fontWeight: 700,
-                          fontSize: '0.85rem',
-                          borderRadius: '0.5rem',
-                          border: isCurrent ? '2px solid #2563eb' : `1px solid ${borderColor}`,
-                          cursor: 'pointer',
-                          transition: 'all 0.15s ease'
-                        }}
-                      >
-                        {idx + 1}
-                      </button>
-                    );
-                  })}
-                </div>
-              </aside>
-            </div>
-          </div>
-        </div>
+      {/* INSTRUCTOR TEST MODE & PREVIEW (Safe Non-Persistent Simulation) */}
+      {isPreviewOpen && selectedExam && (
+        <InstructorExamTestModal
+          examId={selectedExam.id}
+          onClose={() => setIsPreviewOpen(false)}
+        />
       )}
     </div>
   );
