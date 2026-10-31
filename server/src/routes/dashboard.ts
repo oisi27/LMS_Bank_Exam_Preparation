@@ -420,19 +420,25 @@ dashboardRouter.get('/student-summary', authenticateToken, (req: Request, res: R
 
 // Admin Live Monitor and Overview
 dashboardRouter.get('/admin-overview', authenticateToken, (req: Request, res: Response) => {
+  const nowIso = new Date().toISOString();
   const activeAttempts = db.prepare(`
     SELECT a.id, a.started_at, a.expires_at, u.name as user_name, u.email as user_email, e.title as exam_title
     FROM attempts a
     JOIN users u ON u.id = a.user_id
     JOIN exams e ON e.id = a.exam_id
-    WHERE a.status = 'IN_PROGRESS'
+    WHERE a.status = 'IN_PROGRESS' AND a.expires_at > ?
     ORDER BY a.started_at DESC
-  `).all();
+  `).all(nowIso);
 
   const recentViolations = db.prepare(`
-    SELECT id, attempt_id, violation_type, details, occurred_at
-    FROM exam_violations
-    ORDER BY occurred_at DESC
+    SELECT ev.id, ev.attempt_id, ev.violation_type, ev.details, ev.occurred_at,
+           u.name as candidate_name, u.email as candidate_email,
+           e.title as exam_title
+    FROM exam_violations ev
+    LEFT JOIN attempts a ON a.id = ev.attempt_id
+    LEFT JOIN users u ON u.id = a.user_id
+    LEFT JOIN exams e ON e.id = a.exam_id
+    ORDER BY ev.occurred_at DESC
     LIMIT 20
   `).all();
 

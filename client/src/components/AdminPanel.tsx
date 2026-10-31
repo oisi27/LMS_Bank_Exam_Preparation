@@ -981,27 +981,58 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onBack, initialTab }) =>
                   <p style={{ color: '#64748b', fontSize: '0.9rem' }}>No integrity violations recorded yet.</p>
                 ) : (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-                    {violations.map((v: any) => (
-                      <div
-                        key={v.id}
-                        style={{
-                          background: 'rgba(239,68,68,0.1)',
-                          padding: '0.75rem 1rem',
-                          borderRadius: '0.5rem',
-                          border: '1px solid rgba(239,68,68,0.2)'
-                        }}
-                      >
-                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.25rem' }}>
-                          <span style={{ color: '#b91c1c', fontWeight: 700, fontSize: '0.85rem' }}>
-                            {v.violation_type}
-                          </span>
-                          <span style={{ color: '#64748b', fontSize: '0.75rem' }}>
-                            {new Date(v.occurred_at).toLocaleTimeString()}
-                          </span>
+                    {violations.map((v: any) => {
+                      const candidateDisplay = v.candidate_name || v.candidateName || 'Unknown';
+                      const examDisplay = v.exam_title || v.examTitle || 'General Examination';
+                      const formattedTime = v.occurred_at
+                        ? new Date(v.occurred_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                        : 'N/A';
+                      const detailsText = (() => {
+                        if (!v.details) return 'Integrity violation detected.';
+                        try {
+                          const parsed = typeof v.details === 'string' ? JSON.parse(v.details) : v.details;
+                          return parsed.reason || (typeof parsed === 'string' ? parsed : JSON.stringify(parsed));
+                        } catch {
+                          return v.details;
+                        }
+                      })();
+
+                      return (
+                        <div
+                          key={v.id}
+                          style={{
+                            background: 'rgba(239,68,68,0.1)',
+                            padding: '0.85rem 1rem',
+                            borderRadius: '0.5rem',
+                            border: '1px solid rgba(239,68,68,0.2)'
+                          }}
+                        >
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '0.35rem' }}>
+                            <div>
+                              <div style={{ fontWeight: 700, fontSize: '0.88rem', color: '#0f172a' }}>
+                                Candidate: {candidateDisplay}
+                              </div>
+                              <div style={{ fontSize: '0.78rem', color: '#475569', marginTop: '1px' }}>
+                                Exam: {examDisplay}
+                              </div>
+                            </div>
+                            <span style={{ color: '#64748b', fontSize: '0.75rem', whiteSpace: 'nowrap', marginLeft: '8px' }}>
+                              Time: {formattedTime}
+                            </span>
+                          </div>
+
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '0.25rem' }}>
+                            <span style={{ color: '#b91c1c', fontWeight: 700, fontSize: '0.82rem' }}>
+                              Violation: {v.violation_type}
+                            </span>
+                          </div>
+
+                          <p style={{ color: '#334155', fontSize: '0.8rem', margin: 0 }}>
+                            Details: {detailsText}
+                          </p>
                         </div>
-                        <p style={{ color: '#334155', fontSize: '0.8rem' }}>{v.details}</p>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>
